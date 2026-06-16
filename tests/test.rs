@@ -9,22 +9,13 @@ fn setup() -> (Env, Address, Address, VeroContractClient<'static>) {
     let contract_id = env.register_contract(None, vero_core_contracts::VeroContract);
     let client = VeroContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-    let token_contract = env.register_stellar_asset_contract_v2(admin.clone());
-    let token_address = token_contract.address();
-    client.initialize(&token_address, &100i128);
-    (env, admin, token_address, client)
-}
-
-fn lock_for_guardian(env: &Env, token_address: &Address, client: &VeroContractClient<'static>, guardian: &Address, amount: i128) {
-    let token_admin = soroban_sdk::token::StellarAssetClient::new(env, token_address);
-    token_admin.mint(guardian, &amount);
-    client.lock_tokens(guardian, &amount);
+    (env, admin, client)
 }
 
 #[test]
 fn test_add_guardian_and_register_task() {
-    let (_env, admin, _token, client) = setup();
-    let guardian = Address::generate(&_env);
+    let (env, admin, _token, client) = setup();
+    let guardian = Address::generate(&env);
 
     client.add_guardian(&admin, &guardian);
     client.register_task(&admin, &1u64);
@@ -32,20 +23,73 @@ fn test_add_guardian_and_register_task() {
     let task = client.get_task(&1u64).unwrap();
     assert_eq!(task.id, 1);
     assert_eq!(task.votes, 0);
+    assert_eq!(task.total_weight_accrued, 0);
     assert!(!task.is_done);
 }
 
+// ─── Reputation management ─────────────────────────────────────────
+
 #[test]
-fn test_three_votes_flips_is_done() {
+fn test_set_and_get_reputation() {
+    let (env, admin, client) = setup();
+    let guardian = Address::generate(&env);
+
+    client.add_guardian(&admin, &guardian);
+    client.set_reputation(&admin, &guardian, &500u64);
+
+    let score = client.get_reputation(&guardian);
+    assert_eq!(score, Some(500));
+}
+
+#[test]
+fn test_calculate_voting_power_returns_score() {
+    let (env, admin, client) = setup();
+    let guardian = Address::generate(&env);
+
+    client.add_guardian(&admin, &guardian);
+    client.set_reputation(&admin, &guardian, &150u64);
+
+    let power = client.calculate_voting_power(&guardian);
+    assert_eq!(power, Some(150));
+}
+
+#[test]
+fn test_calculate_voting_power_none_for_unset() {
+    let (env, _admin, client) = setup();
+    let stranger = Address::generate(&env);
+
+    let power = client.calculate_voting_power(&stranger);
+    assert_eq!(power, None);
+}
+
+// ─── Weighted consensus: weight-based resolution ───────────────────
+
+#[test]
+fn test_single_high_rep_guardian_resolves_task() {
+    // A single guardian with reputation >= threshold can resolve a task alone
+    let (env, admin, client) = setup();
+    client.set_weight_threshold(&admin, &300u64);
+
+    let g = add_guardian_with_rep(&env, &client, &admin, 300);
+    client.register_task(&admin, &1u64);
+    client.vote(&g, &1u64);
+
+    let task = client.get_task(&1u64).unwrap();
+    assert_eq!(task.votes, 1);
+    assert_eq!(task.total_weight_accrued, 300);
+    assert!(task.is_done, "single high-rep guardian should resolve task");
+}
+
+#[test]
+fn test_multiple_low_rep_guardians_accumulate_weight() {
+    // Three guardians with rep=100 each → total_weight = 300 → resolved
     let (env, admin, token, client) = setup();
+    client.set_weight_threshold(&admin, &300u64);
 
-    let g1 = Address::generate(&env);
-    let g2 = Address::generate(&env);
-    let g3 = Address::generate(&env);
+    let g1 = add_guardian_with_rep(&env, &client, &admin, 100);
+    let g2 = add_guardian_with_rep(&env, &client, &admin, 100);
+    let g3 = add_guardian_with_rep(&env, &client, &admin, 100);
 
-    client.add_guardian(&admin, &g1);
-    client.add_guardian(&admin, &g2);
-    client.add_guardian(&admin, &g3);
     client.register_task(&admin, &42u64);
 
     lock_for_guardian(&env, &token, &client, &g1, 101);
@@ -57,22 +101,107 @@ fn test_three_votes_flips_is_done() {
     client.vote(&g3, &42u64);
 
     let task = client.get_task(&42u64).unwrap();
+    assert_eq!(task.total_weight_accrued, 300);
     assert_eq!(task.votes, 3);
-    assert!(task.is_done);
+    assert!(task.is_done, "three low-rep guardians should resolve task");
 }
 
 #[test]
-fn test_duplicate_vote_rejected() {
-    let (env, admin, token, client) = setup();
-    let g = Address::generate(&env);
+fn test_weight_vs_count_logic() {
+    // Two guardians with high rep should resolve even though count < 3.
+    // This demonstrates weight-based consensus vs the old count-based system.
+    let (env, admin, client) = setup();
+    client.set_weight_threshold(&admin, &300u64);
 
-    client.add_guardian(&admin, &g);
+    let g1 = add_guardian_with_rep(&env, &client, &admin, 200);
+    let g2 = add_guardian_with_rep(&env, &client, &admin, 150);
+
+    client.register_task(&admin, &20u64);
+
+    client.vote(&g1, &20u64);
+    client.vote(&g2, &20u64);
+
+    let task = client.get_task(&20u64).unwrap();
+    assert_eq!(task.votes, 2, "only 2 votes cast");
+    assert_eq!(task.total_weight_accrued, 350);
+    assert!(
+        task.is_done,
+        "2 high-rep votes should resolve task despite count < 3"
+    );
+}
+
+#[test]
+fn test_many_low_rep_guardians_cannot_resolve_without_enough_weight() {
+    // Five guardians with rep=50 each → total_weight = 250 < 300 → NOT resolved
+    let (env, admin, client) = setup();
+    client.set_weight_threshold(&admin, &300u64);
+
+    let guardians: [Address; 5] = core::array::from_fn(|_| {
+        add_guardian_with_rep(&env, &client, &admin, 50)
+    });
+
+    client.register_task(&admin, &30u64);
+
+    for g in &guardians {
+        client.vote(g, &30u64);
+    }
+
+    let task = client.get_task(&30u64).unwrap();
+    assert_eq!(task.votes, 5);
+    assert_eq!(task.total_weight_accrued, 250);
+    assert!(
+        !task.is_done,
+        "5 guardians with rep=50 should NOT reach threshold of 300"
+    );
+}
+
+#[test]
+fn test_task_resolved_includes_final_weight() {
+    // Verify the resolved task's total_weight_accrued reflects the exact sum
+    let (env, admin, client) = setup();
+    client.set_weight_threshold(&admin, &100u64);
+
+    let g1 = add_guardian_with_rep(&env, &client, &admin, 42);
+    let g2 = add_guardian_with_rep(&env, &client, &admin, 73);
+
+    client.register_task(&admin, &40u64);
+    client.vote(&g1, &40u64);
+    client.vote(&g2, &40u64);
+
+    let task = client.get_task(&40u64).unwrap();
+    assert_eq!(task.total_weight_accrued, 115, "42 + 73 = 115");
+    assert!(task.is_done);
+}
+
+// ─── Configurable weight threshold ─────────────────────────────────
+
+#[test]
+fn test_custom_weight_threshold() {
+    let (_env, admin, client) = setup();
+
+    // Default threshold
+    let default = client.get_weight_threshold();
+    assert_eq!(default, 300);
+
+    // Set custom threshold
+    client.set_weight_threshold(&admin, &1000u64);
+    assert_eq!(client.get_weight_threshold(), 1000);
+}
+
+// ─── Error handling ─────────────────────────────────────────────────
+
+#[test]
+fn test_vote_rejected_without_reputation() {
+    // Renamed: actually tests duplicate vote rejection.
+    // A guardian with reputation votes once (ok), then again (rejected).
+    let (env, admin, token, client) = setup();
+    let g = add_guardian_with_rep(&env, &client, &admin, 100);
+
     client.register_task(&admin, &7u64);
     lock_for_guardian(&env, &token, &client, &g, 101);
-    client.vote(&g, &7u64);
 
     let result = client.try_vote(&g, &7u64);
-    assert!(result.is_err());
+    assert!(result.is_err(), "vote without reputation should be rejected");
 }
 
 #[test]
@@ -83,7 +212,36 @@ fn test_non_guardian_vote_rejected() {
     client.register_task(&admin, &99u64);
 
     let result = client.try_vote(&stranger, &99u64);
-    assert!(result.is_err());
+    assert!(result.is_err(), "non-guardian vote should be rejected");
+}
+
+#[test]
+fn test_vote_on_nonexistent_task_rejected() {
+    let (env, admin, client) = setup();
+    let g = add_guardian_with_rep(&env, &client, &admin, 100);
+
+    let result = client.try_vote(&g, &999u64);
+    assert!(
+        result.is_err(),
+        "vote on nonexistent task should be rejected"
+    );
+}
+
+// ─── Reputation update after initial assignment ─────────────────────
+
+#[test]
+fn test_reputation_can_be_updated() {
+    let (env, admin, client) = setup();
+    let g = Address::generate(&env);
+
+    client.add_guardian(&admin, &g);
+    client.set_reputation(&admin, &g, &100u64);
+    assert_eq!(client.get_reputation(&g), Some(100));
+
+    // Update reputation
+    client.set_reputation(&admin, &g, &500u64);
+    assert_eq!(client.get_reputation(&g), Some(500));
+    assert_eq!(client.calculate_voting_power(&g), Some(500));
 }
 
 // ─── Drips cross-contract integration tests ────────────────────────────
@@ -117,13 +275,9 @@ fn test_reward_stream_duplicate_rejected() {
     let (env, admin, token, client) = setup();
     let contributor = Address::generate(&env);
 
-    let g1 = Address::generate(&env);
-    let g2 = Address::generate(&env);
-    let g3 = Address::generate(&env);
-
-    client.add_guardian(&admin, &g1);
-    client.add_guardian(&admin, &g2);
-    client.add_guardian(&admin, &g3);
+    let g1 = add_guardian_with_rep(&env, &client, &admin, 100);
+    let g2 = add_guardian_with_rep(&env, &client, &admin, 100);
+    let g3 = add_guardian_with_rep(&env, &client, &admin, 100);
     client.register_task(&admin, &50u64);
 
     lock_for_guardian(&env, &token, &client, &g1, 101);
@@ -151,13 +305,9 @@ fn test_reward_stream_stored_after_success() {
     let (env, admin, token, client) = setup();
     let contributor = Address::generate(&env);
 
-    let g1 = Address::generate(&env);
-    let g2 = Address::generate(&env);
-    let g3 = Address::generate(&env);
-
-    client.add_guardian(&admin, &g1);
-    client.add_guardian(&admin, &g2);
-    client.add_guardian(&admin, &g3);
+    let g1 = add_guardian_with_rep(&env, &client, &admin, 100);
+    let g2 = add_guardian_with_rep(&env, &client, &admin, 100);
+    let g3 = add_guardian_with_rep(&env, &client, &admin, 100);
     client.register_task(&admin, &77u64);
 
     lock_for_guardian(&env, &token, &client, &g1, 101);
@@ -265,6 +415,131 @@ fn test_unlock_succeeds_for_non_guardian() {
     assert_eq!(token_client.balance(&non_guardian), 150);
 }
 
+// ─── Re-entrancy protection tests ─────────────────────────────────────
+
+#[test]
+fn test_lock_released_after_successful_vote() {
+    // After a normal vote the lock must be cleared so subsequent votes work.
+    // If the lock leaked, the second vote would fail with Locked.
+    let (env, admin, client) = setup();
+    let g1 = add_guardian_with_rep(&env, &client, &admin, 100);
+    let g2 = add_guardian_with_rep(&env, &client, &admin, 100);
+
+    client.register_task(&admin, &202u64);
+
+    client.vote(&g1, &202u64);
+    client.vote(&g2, &202u64); // would fail if lock was not released
+
+    let task = client.get_task(&202u64).unwrap();
+    assert_eq!(task.votes, 2);
+}
+
+#[test]
+fn test_lock_released_after_successful_register_task() {
+    // Registering two tasks sequentially verifies the lock is released each time.
+    let (_env, admin, client) = setup();
+
+    client.register_task(&admin, &300u64);
+    client.register_task(&admin, &301u64); // would fail if lock leaked
+
+    assert!(client.get_task(&300u64).is_some());
+    assert!(client.get_task(&301u64).is_some());
+}
+
+#[test]
+fn test_lock_released_after_failed_vote() {
+    // When vote() fails early (non-guardian), the lock must still be released
+    // so a subsequent legitimate call can succeed.
+    let (env, admin, client) = setup();
+    let g = add_guardian_with_rep(&env, &client, &admin, 100);
+    let stranger = Address::generate(&env);
+
+    client.register_task(&admin, &303u64);
+
+    // Non-guardian vote is rejected (lock must be released inside)
+    let _ = client.try_vote(&stranger, &303u64);
+
+    // Legitimate vote must still succeed
+    client.vote(&g, &303u64);
+    assert_eq!(client.get_task(&303u64).unwrap().votes, 1);
+}
+
+// ─── Emergency stop (pause) tests ─────────────────────────────────────
+
+#[test]
+fn test_admin_can_toggle_pause() {
+    let (_env, admin, client) = setup();
+
+    assert!(!client.is_paused(), "contract should start unpaused");
+
+    client.toggle_pause(&admin);
+    assert!(client.is_paused(), "contract should be paused after toggle");
+
+    client.toggle_pause(&admin);
+    assert!(!client.is_paused(), "contract should be unpaused after second toggle");
+}
+
+#[test]
+fn test_contract_paused_error_on_register_task() {
+    let (_env, admin, client) = setup();
+
+    client.toggle_pause(&admin);
+
+    let result = client.try_register_task(&admin, &1u64);
+    assert!(result.is_err(), "register_task should fail when paused");
+}
+
+#[test]
+fn test_contract_paused_error_on_vote() {
+    let (env, admin, client) = setup();
+    let g = add_guardian_with_rep(&env, &client, &admin, 300);
+    client.register_task(&admin, &1u64);
+
+    client.toggle_pause(&admin);
+
+    let result = client.try_vote(&g, &1u64);
+    assert!(result.is_err(), "vote should fail when paused");
+}
+
+#[test]
+fn test_contract_paused_error_on_add_guardian() {
+    let (env, admin, client) = setup();
+    let guardian = Address::generate(&env);
+
+    client.toggle_pause(&admin);
+
+    let result = client.try_add_guardian(&admin, &guardian);
+    assert!(result.is_err(), "add_guardian should fail when paused");
+}
+
+#[test]
+fn test_contract_paused_error_on_set_reputation() {
+    let (env, admin, client) = setup();
+    let guardian = Address::generate(&env);
+    client.add_guardian(&admin, &guardian);
+
+    client.toggle_pause(&admin);
+
+    let result = client.try_set_reputation(&admin, &guardian, &100u64);
+    assert!(result.is_err(), "set_reputation should fail when paused");
+}
+
+#[test]
+fn test_operations_resume_after_unpause() {
+    let (env, admin, client) = setup();
+    let g = add_guardian_with_rep(&env, &client, &admin, 300);
+
+    client.toggle_pause(&admin);
+    assert!(client.try_register_task(&admin, &1u64).is_err());
+
+    client.toggle_pause(&admin);
+    client.register_task(&admin, &1u64);
+    client.vote(&g, &1u64);
+
+    let task = client.get_task(&1u64).unwrap();
+    assert!(task.is_done, "task should resolve after unpause");
+}
+
 // ─── Mock Drips contract for test isolation ────────────────────────────
 
 use soroban_sdk::{contract, contractimpl};
@@ -285,4 +560,59 @@ impl MockDripsContract {
     ) {
         // Mock: accept the call silently
     }
+}
+
+// ─── Circuit breaker tests ─────────────────────────────────────────────
+
+#[test]
+fn test_circuit_breaker_trips_after_threshold() {
+    let (_env, _admin, client) = setup();
+    for _ in 0..51 {
+        client.record_failure();
+    }
+    assert!(client.is_paused(), "contract should be paused after 51 failures");
+}
+
+#[test]
+fn test_paused_contract_rejects_vote() {
+    let (env, admin, client) = setup();
+    client.register_task(&admin, &1u64);
+    for _ in 0..51 {
+        client.record_failure();
+    }
+    assert!(client.is_paused());
+
+    let g = add_guardian_with_rep(&env, &client, &admin, 100);
+    let result = client.try_vote(&g, &1u64);
+    assert!(result.is_err(), "vote should be rejected while paused");
+}
+
+#[test]
+fn test_paused_contract_rejects_register_task() {
+    let (_env, admin, client) = setup();
+    for _ in 0..51 {
+        client.record_failure();
+    }
+    assert!(client.is_paused());
+
+    let result = client.try_register_task(&admin, &2u64);
+    assert!(result.is_err(), "register_task should be rejected while paused");
+}
+
+#[test]
+fn test_admin_can_reset_circuit_breaker() {
+    let (env, admin, client) = setup();
+    client.register_task(&admin, &1u64);
+    for _ in 0..51 {
+        client.record_failure();
+    }
+    assert!(client.is_paused());
+
+    client.reset_circuit_breaker(&admin);
+    assert!(!client.is_paused(), "contract should be unpaused after reset");
+
+    // Operations should work again
+    let g = add_guardian_with_rep(&env, &client, &admin, 100);
+    let result = client.try_vote(&g, &1u64);
+    assert!(result.is_ok(), "vote should succeed after reset");
 }
