@@ -20,13 +20,11 @@ pub fn register_tasks(env: &Env, admin: Address, task_ids: Vec<u64>) -> Result<(
         .get(&DataKey::AllTasks)
         .unwrap_or(Vec::new(env));
 
-    for task_id in task_ids.into_iter() {
+    for task_id in task_ids.iter() {
         if storage::has_active_task(env, task_id) || storage::get_archived_task(env, task_id).is_some() {
             reentrancy::unlock(env);
             return Err(ContractError::NotAuthorized);
         }
-
-        all_tasks.push_back(task_id);
 
         let task = Task {
             id: task_id,
@@ -39,6 +37,7 @@ pub fn register_tasks(env: &Env, admin: Address, task_ids: Vec<u64>) -> Result<(
         storage::set_active_task(env, &task);
     }
 
+    all_tasks.append(&task_ids);
     env.storage().instance().set(&DataKey::AllTasks, &all_tasks);
 
     reentrancy::unlock(env);
