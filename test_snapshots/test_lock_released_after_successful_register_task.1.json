@@ -169,22 +169,7 @@
                         "key": {
                           "vec": [
                             {
-                              "symbol": "LockThreshold"
-                            }
-                          ]
-                        },
-                        "val": {
-                          "i128": {
-                            "hi": 0,
-                            "lo": 100
-                          }
-                        }
-                      },
-                      {
-                        "key": {
-                          "vec": [
-                            {
-                              "symbol": "Task"
+                              "symbol": "ActiveTask"
                             },
                             {
                               "u64": 300
@@ -203,10 +188,26 @@
                             },
                             {
                               "key": {
+                                "symbol": "is_cancelled"
+                              },
+                              "val": {
+                                "bool": false
+                              }
+                            },
+                            {
+                              "key": {
                                 "symbol": "is_done"
                               },
                               "val": {
                                 "bool": false
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "resolved_at"
+                              },
+                              "val": {
+                                "u64": 0
                               }
                             },
                             {
@@ -232,7 +233,7 @@
                         "key": {
                           "vec": [
                             {
-                              "symbol": "Task"
+                              "symbol": "ActiveTask"
                             },
                             {
                               "u64": 301
@@ -251,10 +252,26 @@
                             },
                             {
                               "key": {
+                                "symbol": "is_cancelled"
+                              },
+                              "val": {
+                                "bool": false
+                              }
+                            },
+                            {
+                              "key": {
                                 "symbol": "is_done"
                               },
                               "val": {
                                 "bool": false
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "resolved_at"
+                              },
+                              "val": {
+                                "u64": 0
                               }
                             },
                             {
@@ -274,6 +291,64 @@
                               }
                             }
                           ]
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "AllTasks"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "vec": [
+                            {
+                              "u64": 300
+                            },
+                            {
+                              "u64": 301
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "Initialized"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "bool": true
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "LockThreshold"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "i128": {
+                            "hi": 0,
+                            "lo": 100
+                          }
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "Paused"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "bool": false
                         }
                       },
                       {
@@ -295,7 +370,7 @@
             },
             "ext": "v0"
           },
-          4095
+          100000
         ]
       ],
       [
@@ -494,7 +569,7 @@
             },
             "ext": "v0"
           },
-          4095
+          100000
         ]
       ]
     ]
@@ -838,10 +913,26 @@
                 },
                 {
                   "key": {
+                    "symbol": "is_cancelled"
+                  },
+                  "val": {
+                    "bool": false
+                  }
+                },
+                {
+                  "key": {
                     "symbol": "is_done"
                   },
                   "val": {
                     "bool": false
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "resolved_at"
+                  },
+                  "val": {
+                    "u64": 0
                   }
                 },
                 {
@@ -920,10 +1011,26 @@
                 },
                 {
                   "key": {
+                    "symbol": "is_cancelled"
+                  },
+                  "val": {
+                    "bool": false
+                  }
+                },
+                {
+                  "key": {
                     "symbol": "is_done"
                   },
                   "val": {
                     "bool": false
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "resolved_at"
+                  },
+                  "val": {
+                    "u64": 0
                   }
                 },
                 {

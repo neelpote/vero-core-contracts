@@ -35,3 +35,8 @@ pub fn emit_task_cancelled(env: &Env, task_id: u64) {
     env.events()
         .publish((symbol_short!("cancelled"),), task_id);
 }
+
+pub fn emit_task_archived(env: &Env, task_id: u64, resolved_at: u64) {
+    env.events()
+        .publish((symbol_short!("archived"),), (task_id, resolved_at));
+}

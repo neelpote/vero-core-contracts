@@ -187,6 +187,98 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "ActiveTask"
+                            },
+                            {
+                              "u64": 2
+                            }
+                          ]
+                        },
+                        "val": {
+                          "map": [
+                            {
+                              "key": {
+                                "symbol": "id"
+                              },
+                              "val": {
+                                "u64": 2
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "is_cancelled"
+                              },
+                              "val": {
+                                "bool": false
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "is_done"
+                              },
+                              "val": {
+                                "bool": false
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "resolved_at"
+                              },
+                              "val": {
+                                "u64": 0
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "total_weight_accrued"
+                              },
+                              "val": {
+                                "u64": 0
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "votes"
+                              },
+                              "val": {
+                                "u32": 0
+                              }
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "AllTasks"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "vec": [
+                            {
+                              "u64": 2
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "Initialized"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "bool": true
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "LockThreshold"
                             }
                           ]
@@ -214,54 +306,6 @@
                         "key": {
                           "vec": [
                             {
-                              "symbol": "Task"
-                            },
-                            {
-                              "u64": 2
-                            }
-                          ]
-                        },
-                        "val": {
-                          "map": [
-                            {
-                              "key": {
-                                "symbol": "id"
-                              },
-                              "val": {
-                                "u64": 2
-                              }
-                            },
-                            {
-                              "key": {
-                                "symbol": "is_done"
-                              },
-                              "val": {
-                                "bool": false
-                              }
-                            },
-                            {
-                              "key": {
-                                "symbol": "total_weight_accrued"
-                              },
-                              "val": {
-                                "u64": 0
-                              }
-                            },
-                            {
-                              "key": {
-                                "symbol": "votes"
-                              },
-                              "val": {
-                                "u32": 0
-                              }
-                            }
-                          ]
-                        }
-                      },
-                      {
-                        "key": {
-                          "vec": [
-                            {
                               "symbol": "TokenAddress"
                             }
                           ]
@@ -277,7 +321,7 @@
             },
             "ext": "v0"
           },
-          4095
+          100000
         ]
       ],
       [
@@ -509,7 +553,7 @@
             },
             "ext": "v0"
           },
-          4095
+          100000
         ]
       ]
     ]
@@ -712,26 +756,6 @@
             ],
             "data": {
               "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-            }
-          }
-        }
-      },
-      "failed_call": false
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
-        "type_": "contract",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "paused"
-              }
-            ],
-            "data": {
-              "bool": true
             }
           }
         }
@@ -961,26 +985,6 @@
       "event": {
         "ext": "v0",
         "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
-        "type_": "contract",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "paused"
-              }
-            ],
-            "data": {
-              "bool": false
-            }
-          }
-        }
-      },
-      "failed_call": false
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
         "type_": "diagnostic",
         "body": {
           "v0": {
@@ -1152,10 +1156,26 @@
                 },
                 {
                   "key": {
+                    "symbol": "is_cancelled"
+                  },
+                  "val": {
+                    "bool": false
+                  }
+                },
+                {
+                  "key": {
                     "symbol": "is_done"
                   },
                   "val": {
                     "bool": false
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "resolved_at"
+                  },
+                  "val": {
+                    "u64": 0
                   }
                 },
                 {

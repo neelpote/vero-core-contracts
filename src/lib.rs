@@ -16,11 +16,12 @@ use soroban_sdk::{contract, contractimpl, Address, Env, Map};
 use types::{ContractError, DataKey, RewardStream, Snapshot};
 
 pub use guardian::{add_guardian, remove_guardian, is_guardian};
-pub use task::{get_task, register_task};
+pub use task::{get_task, register_tasks};
 pub use drips::{get_reward_stream, start_drips_stream};
 pub use types::Operation;
 
 const DEFAULT_WEIGHT_THRESHOLD: u64 = 300;
+const VERSION: u32 = 1;
 
 #[contract]
 pub struct VeroCore;
@@ -85,6 +86,86 @@ impl VeroCore {
         guardian::is_guardian(&env, &guardian)
     }
 
+    pub fn lock_tokens(
+        env: Env,
+        guardian: Address,
+        amount: i128,
+    ) -> Result<(), ContractError> {
+        guardian.require_auth();
+
+        let token_key = DataKey::TokenAddress;
+        if !env.storage().instance().has(&token_key) {
+            return Err(ContractError::NotInitialized);
+        }
+        let token_address: Address = env.storage().instance().get(&token_key).unwrap();
+
+        let client = soroban_sdk::token::Client::new(&env, &token_address);
+        client.transfer(&guardian, &env.current_contract_address(), &amount);
+
+        let balance_key = DataKey::LockedBalance(guardian.clone());
+        let current_balance: i128 = env.storage().instance().get(&balance_key).unwrap_or(0);
+        env.storage().instance().set(&balance_key, &(current_balance + amount));
+
+        Ok(())
+    }
+
+    pub fn resign_guardian(
+        env: Env,
+        guardian: Address,
+    ) -> Result<(), ContractError> {
+        guardian.require_auth();
+
+        let token_key = DataKey::TokenAddress;
+        if !env.storage().instance().has(&token_key) {
+            return Err(ContractError::NotInitialized);
+        }
+
+        if !guardian::is_guardian(&env, &guardian) {
+            return Err(ContractError::NotGuardian);
+        }
+
+        let key = DataKey::Guardian(guardian.clone());
+        env.storage().instance().set(&key, &false);
+
+        let balance_key = DataKey::LockedBalance(guardian.clone());
+        let locked_balance: i128 = env.storage().instance().get(&balance_key).unwrap_or(0);
+        if locked_balance > 0 {
+            let token_address: Address = env.storage().instance().get(&token_key).unwrap();
+            let client = soroban_sdk::token::Client::new(&env, &token_address);
+            client.transfer(&env.current_contract_address(), &guardian, &locked_balance);
+            env.storage().instance().set(&balance_key, &0i128);
+        }
+
+        Ok(())
+    }
+
+    pub fn unlock_tokens(
+        env: Env,
+        guardian: Address,
+    ) -> Result<(), ContractError> {
+        guardian.require_auth();
+
+        let token_key = DataKey::TokenAddress;
+        if !env.storage().instance().has(&token_key) {
+            return Err(ContractError::NotInitialized);
+        }
+
+        if guardian::is_guardian(&env, &guardian) {
+            return Err(ContractError::StillGuardian);
+        }
+
+        let balance_key = DataKey::LockedBalance(guardian.clone());
+        let locked_balance: i128 = env.storage().instance().get(&balance_key).unwrap_or(0);
+        if locked_balance > 0 {
+            let token_address: Address = env.storage().instance().get(&token_key).unwrap();
+            let client = soroban_sdk::token::Client::new(&env, &token_address);
+            client.transfer(&env.current_contract_address(), &guardian, &locked_balance);
+            env.storage().instance().set(&balance_key, &0i128);
+        }
+
+        Ok(())
+    }
+
     pub fn set_reputation(
         env: Env,
         admin: Address,
@@ -98,6 +179,10 @@ impl VeroCore {
 
     pub fn get_reputation(env: Env, guardian: Address) -> Option<u64> {
         reputation::get_reputation(&env, &guardian)
+    }
+
+    pub fn calculate_voting_power(env: Env, guardian: Address) -> Option<u64> {
+        reputation::calculate_voting_power(&env, &guardian)
     }
 
     pub fn set_weight_threshold(env: Env, admin: Address, threshold: u64) -> Result<(), ContractError> {
@@ -184,7 +269,7 @@ impl VeroCore {
             return Err(ContractError::ZeroWeightVote);
         }
 
-        let task_key = DataKey::Task(task_id);
+        let task_key = DataKey::ActiveTask(task_id);
         let mut t: types::Task = match env.storage().instance().get(&task_key) {
             Some(t) => t,
             None => {
@@ -215,6 +300,7 @@ impl VeroCore {
 
         if t.total_weight_accrued >= weight_threshold {
             t.is_done = true;
+            t.resolved_at = env.ledger().timestamp();
             events::emit_task_resolved(&env, task_id, t.total_weight_accrued);
 
             if let Some(vault_addr) = env.storage().instance().get::<_, Address>(&DataKey::VaultAddress) {
@@ -245,6 +331,23 @@ impl VeroCore {
 
     pub fn get_task(env: Env, task_id: u64) -> Option<types::Task> {
         task::get_task(&env, task_id)
+    }
+
+    pub fn archive_task(env: Env, task_id: u64) -> Result<(), ContractError> {
+        circuit_breaker::require_not_paused(&env)?;
+        let task = storage::get_active_task(&env, task_id).ok_or(ContractError::TaskNotFound)?;
+        storage::archive_task(&env, task_id)?;
+        events::emit_task_archived(&env, task_id, task.resolved_at);
+        Ok(())
+    }
+
+    pub fn get_archived_task(env: Env, task_id: u64) -> Result<Option<types::Task>, ContractError> {
+        circuit_breaker::require_not_paused(&env)?;
+        Ok(storage::get_archived_task(&env, task_id))
+    }
+
+    pub fn get_version(_env: Env) -> u32 {
+        VERSION
     }
 
     pub fn start_reward_stream(
