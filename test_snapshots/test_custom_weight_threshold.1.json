@@ -147,6 +147,18 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "Initialized"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "bool": true
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "LockThreshold"
                             }
                           ]
@@ -156,6 +168,18 @@
                             "hi": 0,
                             "lo": 100
                           }
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "Paused"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "bool": false
                         }
                       },
                       {
@@ -189,7 +213,7 @@
             },
             "ext": "v0"
           },
-          4095
+          100000
         ]
       ],
       [
@@ -355,7 +379,7 @@
             },
             "ext": "v0"
           },
-          4095
+          100000
         ]
       ]
     ]

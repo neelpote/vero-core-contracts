@@ -2,7 +2,7 @@ use soroban_sdk::{Address, Env, Vec};
 
 use crate::reentrancy;
 use crate::storage;
-use crate::types::{ContractError, Task};
+use crate::types::{ContractError, DataKey, Task};
 
 const MAX_REGISTER_TASK_BATCH_SIZE: u32 = 32;
 
@@ -14,30 +14,32 @@ pub fn register_tasks(env: &Env, admin: Address, task_ids: Vec<u64>) -> Result<(
     admin.require_auth();
     reentrancy::lock(env)?;
 
-    for task_id in task_ids.into_iter() {
-        let key = DataKey::Task(task_id);
-        if env.storage().instance().has(&key) {
-            reentrancy::unlock(env);
-            return Err(ContractError::NotAuthorized);
-        }
-
     let mut all_tasks: Vec<u64> = env
         .storage()
         .instance()
         .get(&DataKey::AllTasks)
         .unwrap_or(Vec::new(env));
-    all_tasks.push_back(task_id);
-    env.storage().instance().set(&DataKey::AllTasks, &all_tasks);
 
-    let task = Task {
-        id: task_id,
-        votes: 0,
-        is_done: false,
-        resolved_at: 0,
-        total_weight_accrued: 0,
-        is_cancelled: false,
-    };
-    storage::set_active_task(env, &task);
+    for task_id in task_ids.into_iter() {
+        if storage::has_active_task(env, task_id) || storage::get_archived_task(env, task_id).is_some() {
+            reentrancy::unlock(env);
+            return Err(ContractError::NotAuthorized);
+        }
+
+        all_tasks.push_back(task_id);
+
+        let task = Task {
+            id: task_id,
+            votes: 0,
+            is_done: false,
+            resolved_at: 0,
+            total_weight_accrued: 0,
+            is_cancelled: false,
+        };
+        storage::set_active_task(env, &task);
+    }
+
+    env.storage().instance().set(&DataKey::AllTasks, &all_tasks);
 
     reentrancy::unlock(env);
     Ok(())
@@ -52,4 +54,26 @@ pub fn get_all_tasks(env: &Env) -> Vec<u64> {
         .instance()
         .get(&DataKey::AllTasks)
         .unwrap_or(Vec::new(env))
+}
+
+pub fn cancel_task(env: &Env, admin: Address, task_id: u64) -> Result<(), ContractError> {
+    admin.require_auth();
+
+    reentrancy::lock(env)?;
+
+    let mut task: Task = match storage::get_active_task(env, task_id) {
+        Some(t) => t,
+        None => {
+            reentrancy::unlock(env);
+            return Err(ContractError::NotAuthorized);
+        }
+    };
+
+    task.is_cancelled = true;
+    storage::set_active_task(env, &task);
+
+    crate::events::emit_task_cancelled(env, task_id);
+
+    reentrancy::unlock(env);
+    Ok(())
 }

@@ -1449,6 +1449,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vero-verification"
+version = "0.1.0"
+dependencies = [
+ "vero-core-contracts",
+]
+
+[[package]]
 name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

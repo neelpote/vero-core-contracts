@@ -1,14 +1,14 @@
 #![cfg(test)]
 
 use soroban_sdk::{testutils::Address as _, Address, Env};
-use vero_core_contracts::VeroContractClient;
+use vero_core_contracts::VeroCoreClient;
 
 #[test]
 fn test_registry_starts_clean() {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, vero_core_contracts::VeroContract);
-    let client = VeroContractClient::new(&env, &contract_id);
+    let contract_id = env.register_contract(None, vero_core_contracts::VeroCore);
+    let client = VeroCoreClient::new(&env, &contract_id);
 
     // No tasks registered yet
     assert!(client.get_task(&1u64).is_none());
@@ -29,8 +29,8 @@ fn test_registry_starts_clean() {
 fn test_reinitialize_reverts() {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, vero_core_contracts::VeroContract);
-    let client = VeroContractClient::new(&env, &contract_id);
+    let contract_id = env.register_contract(None, vero_core_contracts::VeroCore);
+    let client = VeroCoreClient::new(&env, &contract_id);
 
     let token_admin = Address::generate(&env);
     let token = env.register_stellar_asset_contract_v2(token_admin);
