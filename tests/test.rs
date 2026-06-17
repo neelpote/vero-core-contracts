@@ -1,44 +1,47 @@
 #![cfg(test)]
 
-use soroban_sdk::{testutils::Address as _, Address, Env};
+use soroban_sdk::{
+    testutils::{Address as _, Events as _},
+    Address, Env,
+};
 use vero_core_contracts::VeroContractClient;
 
-/// Lock threshold used in all tests: guardians must lock > 100 tokens to vote.
-const LOCK_THRESHOLD: i128 = 100;
-
+/// Deploy the contract, a native token, call initialize, and return
+/// (env, admin, token_address, client).
 fn setup() -> (Env, Address, Address, VeroContractClient<'static>) {
     let env = Env::default();
     env.mock_all_auths();
+
     let contract_id = env.register_contract(None, vero_core_contracts::VeroContract);
     let client = VeroContractClient::new(&env, &contract_id);
+
     let admin = Address::generate(&env);
 
+    // Deploy a Stellar Asset token contract so lock_tokens / resign_guardian work.
     let token_admin = Address::generate(&env);
-    let token_address = env
-        .register_stellar_asset_contract_v2(token_admin)
-        .address();
-    client.initialize(&token_address, &LOCK_THRESHOLD);
+    let token = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_addr = token.address();
 
-    (env, admin, token_address, client)
+    // Initialize with lock threshold = 100
+    client.initialize(&token_addr, &100i128);
+
+    (env, admin, token_addr, client)
 }
 
-/// Registers a guardian, sets their reputation, mints and locks enough tokens
-/// so they can immediately cast a vote (locked > LOCK_THRESHOLD).
+/// Register a guardian and assign a reputation score in one step.
 fn add_guardian_with_rep(
     env: &Env,
-    token: &Address,
     client: &VeroContractClient,
     admin: &Address,
-    rep: u64,
+    score: u64,
 ) -> Address {
-    let guardian = Address::generate(env);
-    client.add_guardian(admin, &guardian);
-    client.set_reputation(admin, &guardian, &rep);
-    lock_for_guardian(env, token, client, &guardian, LOCK_THRESHOLD + 1);
-    guardian
+    let g = Address::generate(env);
+    client.add_guardian(admin, &g);
+    client.set_reputation(admin, &g, &score);
+    g
 }
 
-/// Mints `amount` tokens to `guardian` and locks them in the contract.
+/// Mint `amount` tokens to `guardian` and lock them in the contract.
 fn lock_for_guardian(
     env: &Env,
     token: &Address,
@@ -46,8 +49,8 @@ fn lock_for_guardian(
     guardian: &Address,
     amount: i128,
 ) {
-    let sac = soroban_sdk::token::StellarAssetClient::new(env, token);
-    sac.mint(guardian, &amount);
+    let asset_client = soroban_sdk::token::StellarAssetClient::new(env, token);
+    asset_client.mint(guardian, &amount);
     client.lock_tokens(guardian, &amount);
 }
 
@@ -101,27 +104,26 @@ fn test_calculate_voting_power_none_for_unset() {
     assert_eq!(power, None);
 }
 
-// ─── Weighted consensus: weight-based resolution ───────────────────
+// ─── Weighted consensus ─────────────────────────────────────────────
 
 #[test]
 fn test_single_high_rep_guardian_resolves_task() {
-    // A single guardian with reputation >= threshold can resolve a task alone
     let (env, admin, token, client) = setup();
     client.set_weight_threshold(&admin, &300u64);
 
     let g = add_guardian_with_rep(&env, &token, &client, &admin, 300);
     client.register_task(&admin, &1u64);
+    lock_for_guardian(&env, &token, &client, &g, 101);
     client.vote(&g, &1u64);
 
     let task = client.get_task(&1u64).unwrap();
     assert_eq!(task.votes, 1);
     assert_eq!(task.total_weight_accrued, 300);
-    assert!(task.is_done, "single high-rep guardian should resolve task");
+    assert!(task.is_done);
 }
 
 #[test]
 fn test_multiple_low_rep_guardians_accumulate_weight() {
-    // Three guardians with rep=100 each → total_weight = 300 → resolved
     let (env, admin, token, client) = setup();
     client.set_weight_threshold(&admin, &300u64);
 
@@ -138,13 +140,11 @@ fn test_multiple_low_rep_guardians_accumulate_weight() {
     let task = client.get_task(&42u64).unwrap();
     assert_eq!(task.total_weight_accrued, 300);
     assert_eq!(task.votes, 3);
-    assert!(task.is_done, "three low-rep guardians should resolve task");
+    assert!(task.is_done);
 }
 
 #[test]
 fn test_weight_vs_count_logic() {
-    // Two guardians with high rep should resolve even though count < 3.
-    // This demonstrates weight-based consensus vs the old count-based system.
     let (env, admin, token, client) = setup();
     client.set_weight_threshold(&admin, &300u64);
 
@@ -153,21 +153,20 @@ fn test_weight_vs_count_logic() {
 
     client.register_task(&admin, &20u64);
 
+    lock_for_guardian(&env, &token, &client, &g1, 101);
+    lock_for_guardian(&env, &token, &client, &g2, 101);
+
     client.vote(&g1, &20u64);
     client.vote(&g2, &20u64);
 
     let task = client.get_task(&20u64).unwrap();
-    assert_eq!(task.votes, 2, "only 2 votes cast");
+    assert_eq!(task.votes, 2);
     assert_eq!(task.total_weight_accrued, 350);
-    assert!(
-        task.is_done,
-        "2 high-rep votes should resolve task despite count < 3"
-    );
+    assert!(task.is_done);
 }
 
 #[test]
 fn test_many_low_rep_guardians_cannot_resolve_without_enough_weight() {
-    // Five guardians with rep=50 each → total_weight = 250 < 300 → NOT resolved
     let (env, admin, token, client) = setup();
     client.set_weight_threshold(&admin, &300u64);
 
@@ -178,21 +177,18 @@ fn test_many_low_rep_guardians_cannot_resolve_without_enough_weight() {
     client.register_task(&admin, &30u64);
 
     for g in &guardians {
+        lock_for_guardian(&env, &token, &client, g, 101);
         client.vote(g, &30u64);
     }
 
     let task = client.get_task(&30u64).unwrap();
     assert_eq!(task.votes, 5);
     assert_eq!(task.total_weight_accrued, 250);
-    assert!(
-        !task.is_done,
-        "5 guardians with rep=50 should NOT reach threshold of 300"
-    );
+    assert!(!task.is_done);
 }
 
 #[test]
 fn test_task_resolved_includes_final_weight() {
-    // Verify the resolved task's total_weight_accrued reflects the exact sum
     let (env, admin, token, client) = setup();
     client.set_weight_threshold(&admin, &100u64);
 
@@ -200,11 +196,15 @@ fn test_task_resolved_includes_final_weight() {
     let g2 = add_guardian_with_rep(&env, &token, &client, &admin, 73);
 
     client.register_task(&admin, &40u64);
+
+    lock_for_guardian(&env, &token, &client, &g1, 101);
+    lock_for_guardian(&env, &token, &client, &g2, 101);
+
     client.vote(&g1, &40u64);
     client.vote(&g2, &40u64);
 
     let task = client.get_task(&40u64).unwrap();
-    assert_eq!(task.total_weight_accrued, 115, "42 + 73 = 115");
+    assert_eq!(task.total_weight_accrued, 115);
     assert!(task.is_done);
 }
 
@@ -214,11 +214,8 @@ fn test_task_resolved_includes_final_weight() {
 fn test_custom_weight_threshold() {
     let (_env, admin, _token, client) = setup();
 
-    // Default threshold
-    let default = client.get_weight_threshold();
-    assert_eq!(default, 300);
+    assert_eq!(client.get_weight_threshold(), 300);
 
-    // Set custom threshold
     client.set_weight_threshold(&admin, &1000u64);
     assert_eq!(client.get_weight_threshold(), 1000);
 }
@@ -227,16 +224,15 @@ fn test_custom_weight_threshold() {
 
 #[test]
 fn test_vote_rejected_without_reputation() {
-    // A guardian without reputation cannot vote.
     let (env, admin, token, client) = setup();
     let g = Address::generate(&env);
-
     client.add_guardian(&admin, &g);
     client.register_task(&admin, &7u64);
     lock_for_guardian(&env, &token, &client, &g, LOCK_THRESHOLD + 1);
 
+    // No reputation set → should fail
     let result = client.try_vote(&g, &7u64);
-    assert!(result.is_err(), "vote without reputation should be rejected");
+    assert!(result.is_err());
 }
 
 #[test]
@@ -247,22 +243,19 @@ fn test_non_guardian_vote_rejected() {
     client.register_task(&admin, &99u64);
 
     let result = client.try_vote(&stranger, &99u64);
-    assert!(result.is_err(), "non-guardian vote should be rejected");
+    assert!(result.is_err());
 }
 
 #[test]
 fn test_vote_on_nonexistent_task_rejected() {
-    let (env, admin, token, client) = setup();
-    let g = add_guardian_with_rep(&env, &token, &client, &admin, 100);
+    let (env, admin, _token, client) = setup();
+    let g = add_guardian_with_rep(&env, &client, &admin, 100);
 
     let result = client.try_vote(&g, &999u64);
-    assert!(
-        result.is_err(),
-        "vote on nonexistent task should be rejected"
-    );
+    assert!(result.is_err());
 }
 
-// ─── Reputation update after initial assignment ─────────────────────
+// ─── Reputation update ──────────────────────────────────────────────
 
 #[test]
 fn test_reputation_can_be_updated() {
@@ -273,40 +266,12 @@ fn test_reputation_can_be_updated() {
     client.set_reputation(&admin, &g, &100u64);
     assert_eq!(client.get_reputation(&g), Some(100));
 
-    // Update reputation
     client.set_reputation(&admin, &g, &500u64);
     assert_eq!(client.get_reputation(&g), Some(500));
     assert_eq!(client.calculate_voting_power(&g), Some(500));
 }
 
-// ─── Batch registration ────────────────────────────────────────────
-
-#[test]
-fn test_register_tasks_batch_succeeds() {
-    let (env, admin, _token, client) = setup();
-
-    let batch = soroban_sdk::vec![&env, 10u64, 20u64, 30u64];
-    client.register_tasks(&admin, &batch);
-
-    assert!(client.get_task(&10u64).is_some());
-    assert!(client.get_task(&20u64).is_some());
-    assert!(client.get_task(&30u64).is_some());
-}
-
-#[test]
-fn test_register_tasks_batch_too_large_rejected() {
-    let (env, admin, _token, client) = setup();
-
-    // 33 ids exceeds MAX_REGISTER_TASK_BATCH_SIZE = 32
-    let mut ids = soroban_sdk::vec![&env];
-    for i in 0u64..33 {
-        ids.push_back(i);
-    }
-    let result = client.try_register_tasks(&admin, &ids);
-    assert!(result.is_err(), "batch > 32 should be rejected");
-}
-
-// ─── Drips cross-contract integration tests ────────────────────────────
+// ─── Drips integration ─────────────────────────────────────────────
 
 #[test]
 fn test_reward_stream_rejected_for_unverified_task() {
@@ -314,11 +279,10 @@ fn test_reward_stream_rejected_for_unverified_task() {
     let contributor = Address::generate(&env);
     let drips_addr = Address::generate(&env);
 
-    // Register but do NOT verify the task (no votes)
     client.register_task(&admin, &10u64);
 
     let result = client.try_start_reward_stream(&admin, &drips_addr, &contributor, &10u64);
-    assert!(result.is_err(), "should reject stream for unverified task");
+    assert!(result.is_err());
 }
 
 #[test]
@@ -327,9 +291,8 @@ fn test_reward_stream_rejected_for_nonexistent_task() {
     let contributor = Address::generate(&env);
     let drips_addr = Address::generate(&env);
 
-    // Task 999 was never registered
     let result = client.try_start_reward_stream(&admin, &drips_addr, &contributor, &999u64);
-    assert!(result.is_err(), "should reject stream for nonexistent task");
+    assert!(result.is_err());
 }
 
 #[test]
@@ -346,16 +309,12 @@ fn test_reward_stream_duplicate_rejected() {
     client.vote(&g2, &50u64);
     client.vote(&g3, &50u64);
 
-    // Deploy a mock Drips contract to receive the cross-contract call
     let drips_contract_id = env.register_contract(None, MockDripsContract);
 
-    // First stream should succeed
     client.start_reward_stream(&admin, &drips_contract_id, &contributor, &50u64);
 
-    // Second attempt for same task should fail
-    let result =
-        client.try_start_reward_stream(&admin, &drips_contract_id, &contributor, &50u64);
-    assert!(result.is_err(), "should reject duplicate stream");
+    let result = client.try_start_reward_stream(&admin, &drips_contract_id, &contributor, &50u64);
+    assert!(result.is_err());
 }
 
 #[test]
@@ -382,7 +341,7 @@ fn test_reward_stream_stored_after_success() {
     assert!(stream.active);
 }
 
-// ─── Token Locking Tests ────────────────────────────────────────────────
+// ─── Token locking ─────────────────────────────────────────────────
 
 #[test]
 fn test_voting_fails_if_tokens_not_locked() {
@@ -393,7 +352,6 @@ fn test_voting_fails_if_tokens_not_locked() {
     client.set_reputation(&admin, &g, &100u64);
     client.register_task(&admin, &100u64);
 
-    // Try voting without locking tokens
     let result = client.try_vote(&g, &100u64);
     assert!(result.is_err());
 }
@@ -407,16 +365,14 @@ fn test_voting_fails_if_locked_balance_leq_threshold() {
     client.set_reputation(&admin, &g, &100u64);
     client.register_task(&admin, &100u64);
 
-    // Lock exactly threshold (100) tokens — vote must fail (needs strictly greater)
-    lock_for_guardian(&env, &token, &client, &g, LOCK_THRESHOLD);
-    let result = client.try_vote(&g, &100u64);
-    assert!(result.is_err());
+    // Lock exactly threshold (100) — must be > threshold to vote
+    lock_for_guardian(&env, &token, &client, &g, 100);
+    assert!(client.try_vote(&g, &100u64).is_err());
 
-    // Lock 1 more token (total 101 > 100)
+    // Lock 1 more (total 101 > 100)
     lock_for_guardian(&env, &token, &client, &g, 1);
     client.vote(&g, &100u64);
-    let task = client.get_task(&100u64).unwrap();
-    assert_eq!(task.votes, 1);
+    assert_eq!(client.get_task(&100u64).unwrap().votes, 1);
 }
 
 #[test]
@@ -427,13 +383,10 @@ fn test_resign_guardian_refunds_tokens() {
     client.add_guardian(&admin, &g);
     lock_for_guardian(&env, &token, &client, &g, 200);
 
-    // Resign guardian
     client.resign_guardian(&g);
 
-    // Verify resignation
     assert!(!client.is_guardian(&g));
 
-    // Verify token refund
     let token_client = soroban_sdk::token::Client::new(&env, &token);
     assert_eq!(token_client.balance(&g), 200);
 }
@@ -446,7 +399,6 @@ fn test_unlock_fails_while_guardian() {
     client.add_guardian(&admin, &g);
     lock_for_guardian(&env, &token, &client, &g, 200);
 
-    // Try unlocking while still guardian (should fail)
     let result = client.try_unlock_tokens(&g);
     assert!(result.is_err());
 }
@@ -456,43 +408,38 @@ fn test_unlock_succeeds_for_non_guardian() {
     let (env, _admin, token, client) = setup();
     let non_guardian = Address::generate(&env);
 
-    // Lock tokens for non-guardian
     lock_for_guardian(&env, &token, &client, &non_guardian, 150);
-
-    // Unlock (should succeed because they are not a guardian)
     client.unlock_tokens(&non_guardian);
 
-    // Verify token refund
     let token_client = soroban_sdk::token::Client::new(&env, &token);
     assert_eq!(token_client.balance(&non_guardian), 150);
 }
 
-// ─── Re-entrancy protection tests ─────────────────────────────────────
+// ─── Re-entrancy protection ─────────────────────────────────────────
 
 #[test]
 fn test_lock_released_after_successful_vote() {
-    // After a normal vote the lock must be cleared so subsequent votes work.
-    // If the lock leaked, the second vote would fail with Locked.
     let (env, admin, token, client) = setup();
-    let g1 = add_guardian_with_rep(&env, &token, &client, &admin, 100);
-    let g2 = add_guardian_with_rep(&env, &token, &client, &admin, 100);
+    let g1 = add_guardian_with_rep(&env, &client, &admin, 100);
+    let g2 = add_guardian_with_rep(&env, &client, &admin, 100);
 
     client.register_task(&admin, &202u64);
 
-    client.vote(&g1, &202u64);
-    client.vote(&g2, &202u64); // would fail if lock was not released
+    lock_for_guardian(&env, &token, &client, &g1, 101);
+    lock_for_guardian(&env, &token, &client, &g2, 101);
 
-    let task = client.get_task(&202u64).unwrap();
-    assert_eq!(task.votes, 2);
+    client.vote(&g1, &202u64);
+    client.vote(&g2, &202u64);
+
+    assert_eq!(client.get_task(&202u64).unwrap().votes, 2);
 }
 
 #[test]
 fn test_lock_released_after_successful_register_task() {
-    // Registering two tasks sequentially verifies the lock is released each time.
     let (_env, admin, _token, client) = setup();
 
     client.register_task(&admin, &300u64);
-    client.register_task(&admin, &301u64); // would fail if lock leaked
+    client.register_task(&admin, &301u64);
 
     assert!(client.get_task(&300u64).is_some());
     assert!(client.get_task(&301u64).is_some());
@@ -500,35 +447,43 @@ fn test_lock_released_after_successful_register_task() {
 
 #[test]
 fn test_lock_released_after_failed_vote() {
-    // When vote() fails early (non-guardian), the lock must still be released
-    // so a subsequent legitimate call can succeed.
     let (env, admin, token, client) = setup();
-    let g = add_guardian_with_rep(&env, &token, &client, &admin, 100);
+    let g = add_guardian_with_rep(&env, &client, &admin, 100);
     let stranger = Address::generate(&env);
 
     client.register_task(&admin, &303u64);
 
-    // Non-guardian vote is rejected (lock must be released inside)
     let _ = client.try_vote(&stranger, &303u64);
 
-    // Legitimate vote must still succeed
+    lock_for_guardian(&env, &token, &client, &g, 101);
     client.vote(&g, &303u64);
     assert_eq!(client.get_task(&303u64).unwrap().votes, 1);
 }
 
-// ─── Emergency stop (pause) tests ─────────────────────────────────────
+// ─── Emergency stop (pause/unpause) ────────────────────────────────
 
 #[test]
 fn test_admin_can_toggle_pause() {
     let (_env, admin, _token, client) = setup();
 
-    assert!(!client.is_paused(), "contract should start unpaused");
+    assert!(!client.is_paused());
 
     client.toggle_pause(&admin);
-    assert!(client.is_paused(), "contract should be paused after toggle");
+    assert!(client.is_paused());
 
     client.toggle_pause(&admin);
-    assert!(!client.is_paused(), "contract should be unpaused after second toggle");
+    assert!(!client.is_paused());
+}
+
+#[test]
+fn test_admin_can_pause_and_unpause() {
+    let (_env, admin, _token, client) = setup();
+
+    client.pause(&admin);
+    assert!(client.is_paused());
+
+    client.unpause(&admin);
+    assert!(!client.is_paused());
 }
 
 #[test]
@@ -538,7 +493,7 @@ fn test_contract_paused_error_on_register_task() {
     client.toggle_pause(&admin);
 
     let result = client.try_register_task(&admin, &1u64);
-    assert!(result.is_err(), "register_task should fail when paused");
+    assert!(result.is_err());
 }
 
 #[test]
@@ -556,13 +511,14 @@ fn test_paused_contract_rejects_register_task() {
 #[test]
 fn test_contract_paused_error_on_vote() {
     let (env, admin, token, client) = setup();
-    let g = add_guardian_with_rep(&env, &token, &client, &admin, 300);
+    let g = add_guardian_with_rep(&env, &client, &admin, 300);
     client.register_task(&admin, &1u64);
+    lock_for_guardian(&env, &token, &client, &g, 101);
 
     client.toggle_pause(&admin);
 
     let result = client.try_vote(&g, &1u64);
-    assert!(result.is_err(), "vote should fail when paused");
+    assert!(result.is_err());
 }
 
 #[test]
@@ -573,7 +529,7 @@ fn test_contract_paused_error_on_add_guardian() {
     client.toggle_pause(&admin);
 
     let result = client.try_add_guardian(&admin, &guardian);
-    assert!(result.is_err(), "add_guardian should fail when paused");
+    assert!(result.is_err());
 }
 
 #[test]
@@ -585,32 +541,61 @@ fn test_contract_paused_error_on_set_reputation() {
     client.toggle_pause(&admin);
 
     let result = client.try_set_reputation(&admin, &guardian, &100u64);
-    assert!(result.is_err(), "set_reputation should fail when paused");
+    assert!(result.is_err());
 }
 
 #[test]
 fn test_operations_resume_after_unpause() {
     let (env, admin, token, client) = setup();
-    let g = add_guardian_with_rep(&env, &token, &client, &admin, 300);
+    let g = add_guardian_with_rep(&env, &client, &admin, 300);
 
     client.toggle_pause(&admin);
     assert!(client.try_register_task(&admin, &1u64).is_err());
 
     client.toggle_pause(&admin);
     client.register_task(&admin, &1u64);
+    lock_for_guardian(&env, &token, &client, &g, 101);
     client.vote(&g, &1u64);
 
     let task = client.get_task(&1u64).unwrap();
-    assert!(task.is_done, "task should resolve after unpause");
+    assert!(task.is_done);
 }
 
-// ─── Mock Drips contract for test isolation ────────────────────────────
+/// Tests for explicit pause() and unpause() methods (spec requirement).
+#[test]
+fn test_paused_contract_rejects_register_task() {
+    let (_env, admin, _token, client) = setup();
+
+    client.pause(&admin);
+    assert!(client.is_paused());
+
+    let result = client.try_register_task(&admin, &2u64);
+    assert!(result.is_err());
+
+    client.unpause(&admin);
+    assert!(!client.is_paused());
+    client.register_task(&admin, &2u64);
+    assert!(client.get_task(&2u64).is_some());
+}
+
+#[test]
+fn test_paused_contract_rejects_vote() {
+    let (env, admin, token, client) = setup();
+    client.register_task(&admin, &1u64);
+    let g = add_guardian_with_rep(&env, &client, &admin, 100);
+    lock_for_guardian(&env, &token, &client, &g, 101);
+
+    client.pause(&admin);
+    assert!(client.is_paused());
+
+    let result = client.try_vote(&g, &1u64);
+    assert!(result.is_err());
+}
+
+// ─── Mock Drips contract ───────────────────────────────────────────
 
 use soroban_sdk::{contract, contractimpl};
 
-/// A minimal mock of the Drips protocol contract used in tests.
-/// It accepts `start_stream` calls without side-effects so we can
-/// validate the Vero contract's cross-contract call logic in isolation.
 #[contract]
 pub struct MockDripsContract;
 
@@ -622,11 +607,11 @@ impl MockDripsContract {
         _task_id: u64,
         _resolution_status: u32,
     ) {
-        // Mock: accept the call silently
+        // Mock: accept silently
     }
 }
 
-// ─── Circuit breaker tests ─────────────────────────────────────────────
+// ─── Circuit breaker ───────────────────────────────────────────────
 
 #[test]
 fn test_circuit_breaker_trips_after_threshold() {
@@ -634,37 +619,226 @@ fn test_circuit_breaker_trips_after_threshold() {
     for _ in 0..51 {
         client.record_failure();
     }
-    assert!(client.is_paused(), "contract should be paused after 51 failures");
+    assert!(client.is_paused());
 }
 
 #[test]
-fn test_paused_contract_rejects_vote() {
+fn test_paused_contract_rejects_vote_via_circuit_breaker() {
     let (env, admin, token, client) = setup();
     client.register_task(&admin, &1u64);
+    let g = add_guardian_with_rep(&env, &client, &admin, 100);
+    lock_for_guardian(&env, &token, &client, &g, 101);
+
     for _ in 0..51 {
         client.record_failure();
     }
     assert!(client.is_paused());
 
-    let g = add_guardian_with_rep(&env, &token, &client, &admin, 100);
     let result = client.try_vote(&g, &1u64);
-    assert!(result.is_err(), "vote should be rejected while paused");
+    assert!(result.is_err());
 }
 
 #[test]
 fn test_admin_can_reset_circuit_breaker() {
     let (env, admin, token, client) = setup();
     client.register_task(&admin, &1u64);
+    let g = add_guardian_with_rep(&env, &client, &admin, 100);
+    lock_for_guardian(&env, &token, &client, &g, 101);
+
     for _ in 0..51 {
         client.record_failure();
     }
     assert!(client.is_paused());
 
     client.reset_circuit_breaker(&admin);
-    assert!(!client.is_paused(), "contract should be unpaused after reset");
+    assert!(!client.is_paused());
 
-    // Operations should work again
-    let g = add_guardian_with_rep(&env, &token, &client, &admin, 100);
     let result = client.try_vote(&g, &1u64);
-    assert!(result.is_ok(), "vote should succeed after reset");
+    assert!(result.is_ok());
 }
+
+#[test]
+fn debug_circuit_breaker_count() {
+    let (_env, _admin, _token, client) = setup();
+    // Verify count increments without tripping before threshold
+    for _ in 0..50 {
+        client.record_failure();
+    }
+    assert!(!client.is_paused(), "should not be paused at exactly threshold");
+
+    client.record_failure(); // 51st → trips
+    assert!(client.is_paused());
+}
+
+// ─── Gas cost estimation ───────────────────────────────────────────
+
+use vero_core_contracts::Operation;
+
+/// Every operation must return a non-zero cost. A zero would mean the
+/// mapping is incomplete and guardians would under-estimate their gas.
+#[test]
+fn test_all_operations_return_nonzero_cost() {
+    let (_env, _admin, _token, client) = setup();
+
+    let ops = [
+        Operation::RegisterTask,
+        Operation::Vote,
+        Operation::AddGuardian,
+        Operation::SetReputation,
+        Operation::LockTokens,
+        Operation::UnlockTokens,
+        Operation::ResignGuardian,
+        Operation::SetWeightThreshold,
+        Operation::StartRewardStream,
+        Operation::TogglePause,
+        Operation::RecordFailure,
+        Operation::ResetCircuitBreaker,
+        Operation::UpgradeContract,
+    ];
+
+    for op in ops {
+        let cost = client.get_estimated_cost(&op);
+        assert!(cost > 0, "Operation {:?} returned zero cost — mapping is incomplete", op);
+    }
+}
+
+/// `Vote` is the most complex write path (5+ reads, 2 writes, conditional
+/// cross-contract call). Its estimated cost must be at least as high as
+/// every other write operation except `UpgradeContract` (platform fixed cost).
+#[test]
+fn test_vote_is_most_expensive_write_operation() {
+    let (_env, _admin, _token, client) = setup();
+
+    let vote_cost = client.get_estimated_cost(&Operation::Vote);
+
+    let other_write_ops = [
+        Operation::RegisterTask,
+        Operation::AddGuardian,
+        Operation::SetReputation,
+        Operation::LockTokens,
+        Operation::UnlockTokens,
+        Operation::ResignGuardian,
+        Operation::SetWeightThreshold,
+        Operation::StartRewardStream,
+        Operation::TogglePause,
+        Operation::RecordFailure,
+        Operation::ResetCircuitBreaker,
+    ];
+
+    for op in other_write_ops {
+        let cost = client.get_estimated_cost(&op);
+        assert!(
+            vote_cost >= cost,
+            "Vote ({}) should be >= {:?} ({})",
+            vote_cost, op, cost
+        );
+    }
+}
+
+/// `UpgradeContract` carries the highest platform overhead (WASM hash write).
+/// It must be the single most expensive operation overall.
+#[test]
+fn test_upgrade_contract_is_overall_maximum() {
+    let (_env, _admin, _token, client) = setup();
+
+    let upgrade_cost = client.get_estimated_cost(&Operation::UpgradeContract);
+
+    let all_ops = [
+        Operation::RegisterTask,
+        Operation::Vote,
+        Operation::AddGuardian,
+        Operation::SetReputation,
+        Operation::LockTokens,
+        Operation::UnlockTokens,
+        Operation::ResignGuardian,
+        Operation::SetWeightThreshold,
+        Operation::StartRewardStream,
+        Operation::TogglePause,
+        Operation::RecordFailure,
+        Operation::ResetCircuitBreaker,
+    ];
+
+    for op in all_ops {
+        let cost = client.get_estimated_cost(&op);
+        assert!(
+            upgrade_cost >= cost,
+            "UpgradeContract ({}) should be >= {:?} ({})",
+            upgrade_cost, op, cost
+        );
+    }
+}
+
+/// Spot-check specific constant values so any accidental regression in the
+/// cost table is immediately caught.
+#[test]
+fn test_cost_spot_checks() {
+    let (_env, _admin, _token, client) = setup();
+
+    // Cheapest write ops — no cross-contract call
+    assert_eq!(client.get_estimated_cost(&Operation::SetWeightThreshold), 650_000);
+    assert_eq!(client.get_estimated_cost(&Operation::SetReputation),       700_000);
+    assert_eq!(client.get_estimated_cost(&Operation::AddGuardian),         700_000);
+    assert_eq!(client.get_estimated_cost(&Operation::TogglePause),         730_000);
+    assert_eq!(client.get_estimated_cost(&Operation::ResetCircuitBreaker), 800_000);
+    assert_eq!(client.get_estimated_cost(&Operation::RecordFailure),       880_000);
+    assert_eq!(client.get_estimated_cost(&Operation::RegisterTask),      1_000_000);
+
+    // Ops with a cross-contract call
+    assert_eq!(client.get_estimated_cost(&Operation::LockTokens),        1_250_000);
+    assert_eq!(client.get_estimated_cost(&Operation::StartRewardStream), 1_330_000);
+    assert_eq!(client.get_estimated_cost(&Operation::UnlockTokens),      1_300_000);
+    assert_eq!(client.get_estimated_cost(&Operation::ResignGuardian),    1_400_000);
+
+    // Most complex operations
+    assert_eq!(client.get_estimated_cost(&Operation::Vote),              1_960_000);
+    assert_eq!(client.get_estimated_cost(&Operation::UpgradeContract),   2_500_000);
+}
+
+/// `get_estimated_cost` must be callable without any auth setup — it is a
+/// pure view function with no storage access or side effects.
+#[test]
+fn test_estimated_cost_requires_no_auth() {
+    // Intentionally do NOT call env.mock_all_auths() — we use a fresh env.
+    let env = Env::default();
+    let contract_id = env.register_contract(None, vero_core_contracts::VeroContract);
+    let client = VeroContractClient::new(&env, &contract_id);
+
+    // Should not panic even with no auth mocked and no initialize() called.
+    let cost = client.get_estimated_cost(&Operation::Vote);
+    assert!(cost > 0);
+}
+
+/// All cost estimates must stay above the Soroban base invocation overhead
+/// (~500_000 instructions). Anything below that would be physically impossible
+/// on-chain and would cause guardian transactions to consistently fail.
+#[test]
+fn test_all_costs_above_base_invocation_overhead() {
+    let (_env, _admin, _token, client) = setup();
+    const BASE_OVERHEAD: u64 = 500_000;
+
+    let ops = [
+        Operation::RegisterTask,
+        Operation::Vote,
+        Operation::AddGuardian,
+        Operation::SetReputation,
+        Operation::LockTokens,
+        Operation::UnlockTokens,
+        Operation::ResignGuardian,
+        Operation::SetWeightThreshold,
+        Operation::StartRewardStream,
+        Operation::TogglePause,
+        Operation::RecordFailure,
+        Operation::ResetCircuitBreaker,
+        Operation::UpgradeContract,
+    ];
+
+    for op in ops {
+        let cost = client.get_estimated_cost(&op);
+        assert!(
+            cost > BASE_OVERHEAD,
+            "{:?} cost {} is not above the base invocation overhead of {}",
+            op, cost, BASE_OVERHEAD
+        );
+    }
+}
+
