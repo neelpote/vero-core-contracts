@@ -890,4 +890,35 @@ fn test_logic_version() {
     assert_eq!(client.get_version(), 1);
 }
 
+#[test]
+fn test_get_snapshot_pagination() {
+    let (env, admin, token, client) = setup();
+
+    let _g1 = add_guardian_with_rep(&env, &token, &client, &admin, 100);
+    let _g2 = add_guardian_with_rep(&env, &token, &client, &admin, 200);
+
+    client.register_task(&admin, &1u64);
+    client.register_task(&admin, &2u64);
+
+    // Get snapshot with offset=0, limit=1
+    let snap1 = client.get_snapshot(&0u32, &1u32);
+    assert_eq!(snap1.guardians.len(), 1);
+    assert_eq!(snap1.tasks.len(), 1);
+
+    // Get snapshot with offset=1, limit=1
+    let snap2 = client.get_snapshot(&1u32, &1u32);
+    assert_eq!(snap2.guardians.len(), 1);
+    assert_eq!(snap2.tasks.len(), 1);
+
+    // Ensure they contain disjoint keys
+    let g1_key = snap1.guardians.keys().get(0).unwrap();
+    let g2_key = snap2.guardians.keys().get(0).unwrap();
+    assert_ne!(g1_key, g2_key);
+
+    let t1_key = snap1.tasks.keys().get(0).unwrap();
+    let t2_key = snap2.tasks.keys().get(0).unwrap();
+    assert_ne!(t1_key, t2_key);
+}
+
+
 

@@ -22,6 +22,7 @@ pub use types::Operation;
 
 const DEFAULT_WEIGHT_THRESHOLD: u64 = 300;
 const VERSION: u32 = 1;
+const MAX_SNAPSHOT_BATCH_SIZE: u32 = 32;
 
 #[contract]
 pub struct VeroCore;
@@ -412,7 +413,7 @@ impl VeroCore {
 
     // ─── Snapshot ──────────────────────────────────────────────────
 
-    pub fn get_snapshot(env: Env) -> Snapshot {
+    pub fn get_snapshot(env: Env, offset: u32, limit: u32) -> Snapshot {
         let paused = env.storage().instance().get(&DataKey::Paused).unwrap_or(false);
         let failure_count = env.storage().instance().get(&DataKey::FailureCount).unwrap_or(0);
         let weight_threshold = env.storage().instance().get(&DataKey::WeightThreshold).unwrap_or(DEFAULT_WEIGHT_THRESHOLD);
@@ -420,14 +421,17 @@ impl VeroCore {
         let vault_address = env.storage().instance().get(&DataKey::VaultAddress);
         let drips_address = env.storage().instance().get(&DataKey::DripsAddress);
 
-        let mut guardians = Map::new(&env);
-        let all_guardians = guardian::get_all_guardians(&env);
-        for g in all_guardians.iter() {
-            guardians.set(g.clone(), guardian::is_guardian(&env, &g));
-        }
+        let limit = core::cmp::min(limit, MAX_SNAPSHOT_BATCH_SIZE);
 
+        let mut guardians = Map::new(&env);
         let mut reputations = Map::new(&env);
-        for g in all_guardians.iter() {
+        let all_guardians = guardian::get_all_guardians(&env);
+        let g_len = all_guardians.len();
+        let g_start = core::cmp::min(offset, g_len);
+        let g_end = core::cmp::min(offset.saturating_add(limit), g_len);
+        let guardians_slice = all_guardians.slice(g_start..g_end);
+        for g in guardians_slice.iter() {
+            guardians.set(g.clone(), guardian::is_guardian(&env, &g));
             if let Some(score) = reputation::get_reputation(&env, &g) {
                 reputations.set(g.clone(), score);
             }
@@ -435,7 +439,11 @@ impl VeroCore {
 
         let mut tasks = Map::new(&env);
         let all_tasks = task::get_all_tasks(&env);
-        for t in all_tasks.iter() {
+        let t_len = all_tasks.len();
+        let t_start = core::cmp::min(offset, t_len);
+        let t_end = core::cmp::min(offset.saturating_add(limit), t_len);
+        let tasks_slice = all_tasks.slice(t_start..t_end);
+        for t in tasks_slice.iter() {
             if let Some(task) = task::get_task(&env, t) {
                 tasks.set(t, task);
             }
@@ -447,13 +455,21 @@ impl VeroCore {
             .instance()
             .get(&DataKey::AllVotes)
             .unwrap_or(soroban_sdk::Vec::new(&env));
-        for v in all_votes.iter() {
+        let v_len = all_votes.len();
+        let v_start = core::cmp::min(offset, v_len);
+        let v_end = core::cmp::min(offset.saturating_add(limit), v_len);
+        let votes_slice = all_votes.slice(v_start..v_end);
+        for v in votes_slice.iter() {
             votes.set(v, true);
         }
 
         let mut reward_streams = Map::new(&env);
         let all_streams = drips::get_all_reward_streams(&env);
-        for s in all_streams.iter() {
+        let s_len = all_streams.len();
+        let s_start = core::cmp::min(offset, s_len);
+        let s_end = core::cmp::min(offset.saturating_add(limit), s_len);
+        let streams_slice = all_streams.slice(s_start..s_end);
+        for s in streams_slice.iter() {
             if let Some(stream) = drips::get_reward_stream(&env, s) {
                 reward_streams.set(s, stream);
             }
