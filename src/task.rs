@@ -1,6 +1,5 @@
 use soroban_sdk::{Address, Env, Vec};
 
-use crate::reentrancy;
 use crate::storage;
 use crate::types::{ContractError, DataKey, Task};
 
@@ -12,7 +11,7 @@ pub fn register_tasks(env: &Env, admin: Address, task_ids: Vec<u64>) -> Result<(
     }
 
     admin.require_auth();
-    reentrancy::lock(env)?;
+    crate::non_reentrant!(env);
 
     let mut all_tasks: Vec<u64> = env
         .storage()
@@ -22,7 +21,6 @@ pub fn register_tasks(env: &Env, admin: Address, task_ids: Vec<u64>) -> Result<(
 
     for task_id in task_ids.iter() {
         if storage::has_active_task(env, task_id) || storage::get_archived_task(env, task_id).is_some() {
-            reentrancy::unlock(env);
             return Err(ContractError::NotAuthorized);
         }
 
@@ -40,7 +38,6 @@ pub fn register_tasks(env: &Env, admin: Address, task_ids: Vec<u64>) -> Result<(
     all_tasks.append(&task_ids);
     env.storage().instance().set(&DataKey::AllTasks, &all_tasks);
 
-    reentrancy::unlock(env);
     Ok(())
 }
 
@@ -58,12 +55,11 @@ pub fn get_all_tasks(env: &Env) -> Vec<u64> {
 pub fn cancel_task(env: &Env, admin: Address, task_id: u64) -> Result<(), ContractError> {
     admin.require_auth();
 
-    reentrancy::lock(env)?;
+    crate::non_reentrant!(env);
 
     let mut task: Task = match storage::get_active_task(env, task_id) {
         Some(t) => t,
         None => {
-            reentrancy::unlock(env);
             return Err(ContractError::NotAuthorized);
         }
     };
@@ -73,6 +69,5 @@ pub fn cancel_task(env: &Env, admin: Address, task_id: u64) -> Result<(), Contra
 
     crate::events::emit_task_cancelled(env, task_id);
 
-    reentrancy::unlock(env);
     Ok(())
 }

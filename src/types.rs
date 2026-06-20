@@ -120,4 +120,5 @@ pub enum ContractError {
     TaskNotStale = 19,
     TaskAlreadyArchived = 20,
     BatchTooLarge = 21,
+    InvalidAddress = 22,
 }

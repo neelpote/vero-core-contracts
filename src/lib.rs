@@ -4,7 +4,7 @@ mod circuit_breaker;
 mod drips;
 mod gas;
 mod guardian;
-mod reentrancy;
+pub mod reentrancy;
 mod reputation;
 mod storage;
 mod task;
@@ -24,6 +24,15 @@ const DEFAULT_WEIGHT_THRESHOLD: u64 = 300;
 const VERSION: u32 = 1;
 const MAX_SNAPSHOT_BATCH_SIZE: u32 = 32;
 
+fn require_not_zero(env: &Env, addr: &Address) -> Result<(), ContractError> {
+    let zero_contract = Address::from_string(&soroban_sdk::String::from_str(env, "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4"));
+    let zero_account = Address::from_string(&soroban_sdk::String::from_str(env, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"));
+    if addr == &zero_contract || addr == &zero_account {
+        return Err(ContractError::InvalidAddress);
+    }
+    Ok(())
+}
+
 #[contract]
 pub struct VeroCore;
 
@@ -33,6 +42,7 @@ impl VeroCore {
         if env.storage().instance().get::<_, bool>(&DataKey::Initialized).unwrap_or(false) {
             return Err(ContractError::AlreadyInitialized);
         }
+        require_not_zero(&env, &token)?;
         env.storage().instance().set(&DataKey::Initialized, &true);
         env.storage().instance().set(&DataKey::TokenAddress, &token);
         env.storage().instance().set(&DataKey::LockThreshold, &lock_threshold);
@@ -73,6 +83,7 @@ impl VeroCore {
 
     pub fn add_guardian(env: Env, admin: Address, guardian: Address) -> Result<(), ContractError> {
         circuit_breaker::require_not_paused(&env)?;
+        require_not_zero(&env, &guardian)?;
         guardian::add_guardian(&env, admin, guardian);
         Ok(())
     }
@@ -93,6 +104,7 @@ impl VeroCore {
         amount: i128,
     ) -> Result<(), ContractError> {
         guardian.require_auth();
+        non_reentrant!(&env);
 
         let token_key = DataKey::TokenAddress;
         if !env.storage().instance().has(&token_key) {
@@ -100,12 +112,12 @@ impl VeroCore {
         }
         let token_address: Address = env.storage().instance().get(&token_key).unwrap();
 
-        let client = soroban_sdk::token::Client::new(&env, &token_address);
-        client.transfer(&guardian, &env.current_contract_address(), &amount);
-
         let balance_key = DataKey::LockedBalance(guardian.clone());
         let current_balance: i128 = env.storage().instance().get(&balance_key).unwrap_or(0);
         env.storage().instance().set(&balance_key, &(current_balance + amount));
+
+        let client = soroban_sdk::token::Client::new(&env, &token_address);
+        client.transfer(&guardian, &env.current_contract_address(), &amount);
 
         Ok(())
     }
@@ -115,6 +127,7 @@ impl VeroCore {
         guardian: Address,
     ) -> Result<(), ContractError> {
         guardian.require_auth();
+        non_reentrant!(&env);
 
         let token_key = DataKey::TokenAddress;
         if !env.storage().instance().has(&token_key) {
@@ -131,10 +144,10 @@ impl VeroCore {
         let balance_key = DataKey::LockedBalance(guardian.clone());
         let locked_balance: i128 = env.storage().instance().get(&balance_key).unwrap_or(0);
         if locked_balance > 0 {
+            env.storage().instance().set(&balance_key, &0i128);
             let token_address: Address = env.storage().instance().get(&token_key).unwrap();
             let client = soroban_sdk::token::Client::new(&env, &token_address);
             client.transfer(&env.current_contract_address(), &guardian, &locked_balance);
-            env.storage().instance().set(&balance_key, &0i128);
         }
 
         Ok(())
@@ -145,6 +158,7 @@ impl VeroCore {
         guardian: Address,
     ) -> Result<(), ContractError> {
         guardian.require_auth();
+        non_reentrant!(&env);
 
         let token_key = DataKey::TokenAddress;
         if !env.storage().instance().has(&token_key) {
@@ -158,10 +172,10 @@ impl VeroCore {
         let balance_key = DataKey::LockedBalance(guardian.clone());
         let locked_balance: i128 = env.storage().instance().get(&balance_key).unwrap_or(0);
         if locked_balance > 0 {
+            env.storage().instance().set(&balance_key, &0i128);
             let token_address: Address = env.storage().instance().get(&token_key).unwrap();
             let client = soroban_sdk::token::Client::new(&env, &token_address);
             client.transfer(&env.current_contract_address(), &guardian, &locked_balance);
-            env.storage().instance().set(&balance_key, &0i128);
         }
 
         Ok(())
@@ -201,9 +215,11 @@ impl VeroCore {
             .unwrap_or(DEFAULT_WEIGHT_THRESHOLD)
     }
 
-    pub fn set_vault_address(env: Env, admin: Address, vault: Address) {
+    pub fn set_vault_address(env: Env, admin: Address, vault: Address) -> Result<(), ContractError> {
         admin.require_auth();
+        require_not_zero(&env, &vault)?;
         env.storage().instance().set(&DataKey::VaultAddress, &vault);
+        Ok(())
     }
 
     // ─── Task lifecycle ────────────────────────────────────────────
@@ -230,16 +246,14 @@ impl VeroCore {
     pub fn vote(env: Env, guardian: Address, task_id: u64) -> Result<(), ContractError> {
         circuit_breaker::require_not_paused(&env)?;
         guardian.require_auth();
-        reentrancy::lock(&env)?;
+        non_reentrant!(&env);
 
         if !guardian::is_guardian(&env, &guardian) {
-            reentrancy::unlock(&env);
             return Err(ContractError::NotAuthorized);
         }
 
         let token_key = DataKey::TokenAddress;
         if !env.storage().instance().has(&token_key) {
-            reentrancy::unlock(&env);
             return Err(ContractError::NotInitialized);
         }
         let threshold: i128 = env.storage().instance().get(&DataKey::LockThreshold).unwrap_or(0);
@@ -247,26 +261,22 @@ impl VeroCore {
         let locked_balance: i128 = env.storage().instance().get(&balance_key).unwrap_or(0);
 
         if locked_balance <= threshold {
-            reentrancy::unlock(&env);
             return Err(ContractError::InsufficientLockedBalance);
         }
 
         let voted_key = DataKey::Voted(task_id, guardian.clone());
         if env.storage().instance().has(&voted_key) {
-            reentrancy::unlock(&env);
             return Err(ContractError::DuplicateVote);
         }
 
         let weight = match reputation::calculate_voting_power(&env, &guardian) {
             Some(w) => w,
             None => {
-                reentrancy::unlock(&env);
                 return Err(ContractError::NoReputationScore);
             }
         };
 
         if weight == 0 {
-            reentrancy::unlock(&env);
             return Err(ContractError::ZeroWeightVote);
         }
 
@@ -274,44 +284,21 @@ impl VeroCore {
         let mut t: types::Task = match env.storage().instance().get(&task_key) {
             Some(t) => t,
             None => {
-                reentrancy::unlock(&env);
                 return Err(ContractError::NotAuthorized);
             }
         };
 
         if t.is_cancelled {
-            reentrancy::unlock(&env);
             return Err(ContractError::TaskCancelled);
         }
 
         t.total_weight_accrued = match t.total_weight_accrued.checked_add(weight) {
             Some(v) => v,
             None => {
-                reentrancy::unlock(&env);
                 return Err(ContractError::WeightOverflow);
             }
         };
         t.votes += 1;
-
-        let weight_threshold: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::WeightThreshold)
-            .unwrap_or(DEFAULT_WEIGHT_THRESHOLD);
-
-        if t.total_weight_accrued >= weight_threshold {
-            t.is_done = true;
-            t.resolved_at = env.ledger().timestamp();
-            events::emit_task_resolved(&env, task_id, t.total_weight_accrued);
-
-            if let Some(vault_addr) = env.storage().instance().get::<_, Address>(&DataKey::VaultAddress) {
-                let vault_client = vault::VaultClient::new(&env, &vault_addr);
-                if vault_client.try_release_funds(&task_id).is_err() {
-                    reentrancy::unlock(&env);
-                    return Err(ContractError::EscrowUnavailable);
-                }
-            }
-        }
 
         let mut all_votes: soroban_sdk::Vec<(u64, Address)> = env
             .storage()
@@ -322,11 +309,35 @@ impl VeroCore {
         env.storage().instance().set(&DataKey::AllVotes, &all_votes);
 
         env.storage().instance().set(&voted_key, &true);
+
+        let weight_threshold: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::WeightThreshold)
+            .unwrap_or(DEFAULT_WEIGHT_THRESHOLD);
+
+        let mut resolves_task = false;
+        if t.total_weight_accrued >= weight_threshold {
+            t.is_done = true;
+            t.resolved_at = env.ledger().timestamp();
+            resolves_task = true;
+        }
+
         env.storage().instance().set(&task_key, &t);
 
         events::emit_weighted_vote(&env, task_id, &guardian, weight);
 
-        reentrancy::unlock(&env);
+        if resolves_task {
+            events::emit_task_resolved(&env, task_id, t.total_weight_accrued);
+
+            if let Some(vault_addr) = env.storage().instance().get::<_, Address>(&DataKey::VaultAddress) {
+                let vault_client = vault::VaultClient::new(&env, &vault_addr);
+                if vault_client.try_release_funds(&task_id).is_err() {
+                    return Err(ContractError::EscrowUnavailable);
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -360,6 +371,10 @@ impl VeroCore {
     ) -> Result<(), ContractError> {
         circuit_breaker::require_not_paused(&env)?;
         admin.require_auth();
+        non_reentrant!(&env);
+
+        require_not_zero(&env, &drips_address)?;
+        require_not_zero(&env, &contributor)?;
 
         let result = drips::start_drips_stream(&env, drips_address, contributor.clone(), task_id);
 

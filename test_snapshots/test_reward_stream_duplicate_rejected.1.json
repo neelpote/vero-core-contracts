@@ -3576,7 +3576,7 @@
           "v0": {
             "topics": [
               {
-                "symbol": "resolved"
+                "symbol": "wt_vote"
               }
             ],
             "data": {
@@ -3585,7 +3585,10 @@
                   "u64": 50
                 },
                 {
-                  "u64": 300
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQG5"
+                },
+                {
+                  "u64": 100
                 }
               ]
             }
@@ -3603,7 +3606,7 @@
           "v0": {
             "topics": [
               {
-                "symbol": "wt_vote"
+                "symbol": "resolved"
               }
             ],
             "data": {
@@ -3612,10 +3615,7 @@
                   "u64": 50
                 },
                 {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQG5"
-                },
-                {
-                  "u64": 100
+                  "u64": 300
                 }
               ]
             }

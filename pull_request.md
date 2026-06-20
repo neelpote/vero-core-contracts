@@ -1,35 +1,54 @@
-# Pull Request: Integrate Formal Verification for Consensus Logic & Repair Unit Tests
+# Pull Request: Strict Reentrancy Protection & Zero-Address Input Validation
 
 ## Description
-This pull request introduces formal verification to the weighted consensus mechanism of the Vero Core Contracts using Kani. It also resolves pre-existing duplicate definitions and type mismatches that were breaking the unit test suite compilation.
+This pull request implements two critical security enhancements for the Vero Core Contracts under the **GrantFox OSS Campaign (Official Campaign)**:
+
+1. **Strict Reentrancy Protection (Closes #67)**:
+   - Introduces a declarative `non_reentrant!` macro backed by a RAII `ReentrancyGuard` pattern.
+   - Automatically drops/releases the reentrancy lock on function exit (even during early returns or `?` error propagation), eliminating manual `reentrancy::unlock` calls.
+   - Applies `non_reentrant!` guard to all state-changing external calls: `lock_tokens`, `resign_guardian`, `unlock_tokens`, and `start_reward_stream` (in addition to `vote`, `register_tasks`, and `cancel_task`).
+   - Enforces the Check-Effects-Interactions (CEI) pattern on these functions to update storage state (e.g. updating locked balance or setting task states) *before* performing any external token transfer or contract invocation.
+2. **Zero-Address Input Validation (Closes #78)**:
+   - Rejects zero-address contract IDs (StrKey: `CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4`) and Stellar null accounts (StrKey: `GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF`) on input parameters for token, guardian, vault, drips, and contributor addresses.
+   - Prevents funds from accidentally being sent to a burn/null address.
+
+Both issues are tracked and rewarded via the **GrantFox OSS** campaign.
+
+---
 
 ## Key Changes
 
-### 1. Pure Consensus Module
-- Extracted and isolated the weighted voting state machine to [src/consensus.rs](file:///c:/Users/Kroman/vero-core-contracts/src/consensus.rs).
-- Added `ConsensusState` and the pure function `apply_vote()` which handles:
-  - Vote weight accumulation.
-  - Votes counter saturating addition (prevents counter overflows).
-  - Validation of threshold logic and completion tracking (`is_done`).
-- Integrated `apply_vote()` into the main contract lifecycle in [src/lib.rs](file:///c:/Users/Kroman/vero-core-contracts/src/lib.rs).
+### 1. Reentrancy Guard & Macro
+- **[src/reentrancy.rs](file:///Users/neelsubhashpote/corecontracts/src/reentrancy.rs)**:
+  - Added `ReentrancyGuard<'a>` and implemented the `Drop` trait to call `reentrancy::unlock`.
+  - Added the `non_reentrant!` macro.
+- **[src/lib.rs](file:///Users/neelsubhashpote/corecontracts/src/lib.rs)**:
+  - Made `reentrancy` module public (`pub mod reentrancy`).
+  - Refactored `vote`, `lock_tokens`, `resign_guardian`, `unlock_tokens`, and `start_reward_stream` to use `non_reentrant!(&env)`.
+  - Enforced Check-Effects-Interactions (CEI) state writes before external calls in `lock_tokens`, `resign_guardian`, `unlock_tokens`, and `vote`.
+- **[src/task.rs](file:///Users/neelsubhashpote/corecontracts/src/task.rs)**:
+  - Refactored `register_tasks` and `cancel_task` to use `crate::non_reentrant!(env)`.
+- **[src/drips.rs](file:///Users/neelsubhashpote/corecontracts/src/drips.rs)**:
+  - Enforced CEI by updating all storage mappings before executing the external `env.invoke_contract` call.
 
-### 2. Formal Verification Crate
-- Created a separate workspace crate `vero-verification` in the [verification/](file:///c:/Users/Kroman/vero-core-contracts/verification) directory.
-- Implemented **9 Kani symbolic proofs** verifying core properties:
-  - **Threshold Invariant**: Task completion requires cumulative weight meeting the threshold.
-  - **No Below-Threshold Resolution**: Proof that no execution path allows resolution below threshold.
-  - **Monotone Resolution**: Task completion state (`is_done`) is irreversible.
-  - **Overflow Protection**: Absolute prevention of weight and votes counter wrapping.
-  - **Degenerate Case Safety**: Safe handling of a zero-weight threshold.
+### 2. Zero-Address input rejection
+- **[src/types.rs](file:///Users/neelsubhashpote/corecontracts/src/types.rs)**:
+  - Added `InvalidAddress = 22` to `ContractError` enum.
+- **[src/lib.rs](file:///Users/neelsubhashpote/corecontracts/src/lib.rs)**:
+  - Implemented `require_not_zero(env: &Env, addr: &Address) -> Result<(), ContractError>` validating against the base32 zero contract ID and the Stellar zero account.
+  - Integrated `require_not_zero` in `initialize`, `add_guardian`, `set_vault_address`, and `start_reward_stream`.
 
-### 3. CI Workflow Integration
-- Integrated a new job `formal-verification` in [.github/workflows/ci.yml](file:///c:/Users/Kroman/vero-core-contracts/.github/workflows/ci.yml) to automatically install the Kani verifier and run proofs on every push and pull request.
+### 3. Tests & Verification
+- **[tests/test.rs](file:///Users/neelsubhashpote/corecontracts/tests/test.rs)**:
+  - Added `test_strict_reentrancy_guards_prevent_reentry` using a mock contract to attempt to reenter the core via `vote` and assert it fails.
+  - Added `test_reentrancy_lock_tokens_prevented`, `test_reentrancy_resign_guardian_prevented`, `test_reentrancy_unlock_tokens_prevented`, and `test_reentrancy_start_reward_stream_prevented` using module-wrapped `MockReentrantToken` and `MockReentrantDrips` to verify reentrancy protection on all state-changing external calls.
+  - Added `test_zero_address_input_rejections` to verify that all-zero contracts and Stellar accounts are rejected with `ContractError::InvalidAddress` across all validation points.
 
-### 4. Unit Test Repairs
-- Cleaned duplicate methods and struct fields in [src/lib.rs](file:///c:/Users/Kroman/vero-core-contracts/src/lib.rs), [src/events.rs](file:///c:/Users/Kroman/vero-core-contracts/src/events.rs), and [src/types.rs](file:///c:/Users/Kroman/vero-core-contracts/src/types.rs).
-- Rewrote the unit test suite in [tests/test.rs](file:///c:/Users/Kroman/vero-core-contracts/tests/test.rs) to properly initialize token locks and setup guardians, ensuring `cargo check --tests` compiles with **0 errors**.
+---
 
 ## Testing & Verification
-- **Local Compilations**: Verified that the contracts and entire test suite compile successfully (`cargo check --tests` finishes with 0 errors).
-- **Verification Proofs**: Configured to run automatically in CI.
-- **Environment Note**: Local test running (`cargo test`) requires MinGW's `dlltool.exe` on Windows-GNU host environments to compile `backtrace` (a `soroban-sdk` testutils dependency). These checks are fully supported and will run in the CI build containers.
+- Ran the entire test suite locally:
+  ```bash
+  cargo test
+  ```
+- **Results**: All 55 tests compiled and passed successfully.

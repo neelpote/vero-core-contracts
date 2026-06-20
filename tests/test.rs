@@ -920,5 +920,303 @@ fn test_get_snapshot_pagination() {
     assert_ne!(t1_key, t2_key);
 }
 
+// ─── Re-entrant testing mock and test case ─────────────────────────
 
+#[contract]
+pub struct MockReentrantVault;
 
+#[contractimpl]
+impl MockReentrantVault {
+    pub fn set_vero(env: Env, vero: Address) {
+        env.storage().instance().set(&soroban_sdk::symbol_short!("vero"), &vero);
+    }
+
+    pub fn is_locked(env: Env) -> bool {
+        env.storage().instance().get(&soroban_sdk::symbol_short!("locked")).unwrap_or(false)
+    }
+
+    pub fn release_funds(env: Env, task_id: u64) {
+        let vero: Address = env.storage().instance().get(&soroban_sdk::symbol_short!("vero")).unwrap();
+        let client = VeroCoreClient::new(&env, &vero);
+        let guardian = Address::generate(&env);
+        let reenter_result = client.try_vote(&guardian, &task_id);
+        
+        let is_locked = reenter_result.is_err();
+        env.storage().instance().set(&soroban_sdk::symbol_short!("locked"), &is_locked);
+    }
+}
+
+#[test]
+fn test_strict_reentrancy_guards_prevent_reentry() {
+    let (env, admin, token, client) = setup();
+    client.set_weight_threshold(&admin, &100u64);
+
+    let vault_id = env.register_contract(None, MockReentrantVault);
+    let vault_client = MockReentrantVaultClient::new(&env, &vault_id);
+    
+    vault_client.set_vero(&client.address);
+    client.set_vault_address(&admin, &vault_id);
+
+    let g = add_guardian_with_rep(&env, &token, &client, &admin, 100);
+    client.register_task(&admin, &10u64);
+    lock_for_guardian(&env, &token, &client, &g, 101);
+
+    // This vote will resolve the task and call vault_client.release_funds,
+    // which attempts to reenter VeroCore via try_vote
+    client.vote(&g, &10u64);
+
+    // Verify the vault mock recorded that the reentrant call was locked
+    assert!(vault_client.is_locked());
+}
+
+// ─── Zero Address Input Checks ─────────────────────────────────────
+
+#[test]
+fn test_zero_address_input_rejections() {
+    let env = Env::default();
+    env.mock_all_auths();
+    
+    // We register the contract but don't initialize it yet
+    let contract_id = env.register_contract(None, vero_core_contracts::VeroCore);
+    let client = VeroCoreClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+
+    let zero_contract = Address::from_string(&soroban_sdk::String::from_str(&env, "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4"));
+    let zero_account = Address::from_string(&soroban_sdk::String::from_str(&env, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"));
+
+    // 1. Initialize checks
+    assert!(client.try_initialize(&zero_contract, &100i128).is_err());
+    assert!(client.try_initialize(&zero_account, &100i128).is_err());
+
+    // Initialize properly for remaining tests
+    let token_admin = Address::generate(&env);
+    let token = env.register_stellar_asset_contract_v2(token_admin);
+    client.initialize(&token.address(), &100i128);
+
+    // 2. Add guardian checks
+    assert!(client.try_add_guardian(&admin, &zero_contract).is_err());
+    assert!(client.try_add_guardian(&admin, &zero_account).is_err());
+
+    // 3. Set vault address checks
+    assert!(client.try_set_vault_address(&admin, &zero_contract).is_err());
+    assert!(client.try_set_vault_address(&admin, &zero_account).is_err());
+
+    // 4. Start reward stream checks
+    let drips_addr = Address::generate(&env);
+    let contributor = Address::generate(&env);
+
+    assert!(client.try_start_reward_stream(&admin, &zero_contract, &contributor, &1u64).is_err());
+    assert!(client.try_start_reward_stream(&admin, &zero_account, &contributor, &1u64).is_err());
+    assert!(client.try_start_reward_stream(&admin, &drips_addr, &zero_contract, &1u64).is_err());
+    assert!(client.try_start_reward_stream(&admin, &drips_addr, &zero_account, &1u64).is_err());
+}
+
+// ─── Token and Drips Reentrancy Protection tests ───────────────────
+
+mod reentrant_token_mock {
+    use super::*;
+
+    #[contract]
+    pub struct MockReentrantToken;
+
+    #[contractimpl]
+    impl MockReentrantToken {
+        pub fn set_vero(env: Env, vero: Address) {
+            env.storage().instance().set(&soroban_sdk::symbol_short!("vero"), &vero);
+        }
+
+        pub fn set_target(env: Env, target: soroban_sdk::Symbol) {
+            env.storage().instance().set(&soroban_sdk::symbol_short!("target"), &target);
+        }
+
+        pub fn is_locked(env: Env) -> bool {
+            env.storage().instance().get(&soroban_sdk::symbol_short!("locked")).unwrap_or(false)
+        }
+
+        pub fn transfer(env: Env, from: Address, _to: Address, amount: i128) {
+            let vero: Address = env.storage().instance().get(&soroban_sdk::symbol_short!("vero")).unwrap();
+            let client = VeroCoreClient::new(&env, &vero);
+            let target: soroban_sdk::Symbol = env.storage().instance().get(&soroban_sdk::symbol_short!("target")).unwrap();
+            
+            if target == soroban_sdk::Symbol::new(&env, "none") {
+                return;
+            }
+
+            let reenter_result = if target == soroban_sdk::Symbol::new(&env, "lock") {
+                client.try_lock_tokens(&from, &amount)
+            } else if target == soroban_sdk::Symbol::new(&env, "resign") {
+                client.try_resign_guardian(&from)
+            } else if target == soroban_sdk::Symbol::new(&env, "unlock") {
+                client.try_unlock_tokens(&from)
+            } else {
+                panic!("invalid target");
+            };
+            
+            let is_locked = reenter_result.is_err();
+            env.storage().instance().set(&soroban_sdk::symbol_short!("locked"), &is_locked);
+        }
+
+        pub fn balance(_env: Env, _id: Address) -> i128 {
+            1000000i128
+        }
+    }
+}
+
+mod reentrant_drips_mock {
+    use super::*;
+
+    #[contract]
+    pub struct MockReentrantDrips;
+
+    #[contractimpl]
+    impl MockReentrantDrips {
+        pub fn set_vero(env: Env, vero: Address) {
+            env.storage().instance().set(&soroban_sdk::symbol_short!("vero"), &vero);
+        }
+
+        pub fn is_locked(env: Env) -> bool {
+            env.storage().instance().get(&soroban_sdk::symbol_short!("locked")).unwrap_or(false)
+        }
+
+        pub fn start_stream(
+            env: Env,
+            contributor: Address,
+            task_id: u64,
+            _resolution_status: u32,
+        ) {
+            let vero: Address = env.storage().instance().get(&soroban_sdk::symbol_short!("vero")).unwrap();
+            let client = VeroCoreClient::new(&env, &vero);
+            let admin = Address::generate(&env);
+            let drips_addr = env.current_contract_address();
+            
+            let reenter_result = client.try_start_reward_stream(&admin, &drips_addr, &contributor, &task_id);
+            
+            let is_locked = reenter_result.is_err();
+            env.storage().instance().set(&soroban_sdk::symbol_short!("locked"), &is_locked);
+        }
+    }
+}
+
+#[test]
+fn test_reentrancy_lock_tokens_prevented() {
+    let env = Env::default();
+    env.mock_all_auths();
+    
+    let reentrant_token_id = env.register_contract(None, reentrant_token_mock::MockReentrantToken);
+    let token_client = reentrant_token_mock::MockReentrantTokenClient::new(&env, &reentrant_token_id);
+    
+    let contract_id = env.register_contract(None, vero_core_contracts::VeroCore);
+    let client = VeroCoreClient::new(&env, &contract_id);
+    
+    token_client.set_vero(&client.address);
+    token_client.set_target(&soroban_sdk::Symbol::new(&env, "lock"));
+    
+    let admin = Address::generate(&env);
+    client.initialize(&reentrant_token_id, &100i128);
+    
+    let guardian = Address::generate(&env);
+    client.add_guardian(&admin, &guardian);
+    
+    client.lock_tokens(&guardian, &101i128);
+    
+    assert!(token_client.is_locked());
+}
+
+#[test]
+fn test_reentrancy_resign_guardian_prevented() {
+    let env = Env::default();
+    env.mock_all_auths();
+    
+    let reentrant_token_id = env.register_contract(None, reentrant_token_mock::MockReentrantToken);
+    let token_client = reentrant_token_mock::MockReentrantTokenClient::new(&env, &reentrant_token_id);
+    
+    let contract_id = env.register_contract(None, vero_core_contracts::VeroCore);
+    let client = VeroCoreClient::new(&env, &contract_id);
+    
+    token_client.set_vero(&client.address);
+    token_client.set_target(&soroban_sdk::Symbol::new(&env, "none"));
+    
+    let admin = Address::generate(&env);
+    client.initialize(&reentrant_token_id, &100i128);
+    
+    let guardian = Address::generate(&env);
+    client.add_guardian(&admin, &guardian);
+    
+    // lock tokens cleanly
+    client.lock_tokens(&guardian, &200i128);
+    
+    // set target to resign for reentrancy
+    token_client.set_target(&soroban_sdk::Symbol::new(&env, "resign"));
+    
+    client.resign_guardian(&guardian);
+    
+    assert!(token_client.is_locked());
+}
+
+#[test]
+fn test_reentrancy_unlock_tokens_prevented() {
+    let env = Env::default();
+    env.mock_all_auths();
+    
+    let reentrant_token_id = env.register_contract(None, reentrant_token_mock::MockReentrantToken);
+    let token_client = reentrant_token_mock::MockReentrantTokenClient::new(&env, &reentrant_token_id);
+    
+    let contract_id = env.register_contract(None, vero_core_contracts::VeroCore);
+    let client = VeroCoreClient::new(&env, &contract_id);
+    
+    token_client.set_vero(&client.address);
+    token_client.set_target(&soroban_sdk::Symbol::new(&env, "none"));
+    
+    let _admin = Address::generate(&env);
+    client.initialize(&reentrant_token_id, &100i128);
+    
+    let non_guardian = Address::generate(&env);
+    
+    // lock tokens cleanly
+    client.lock_tokens(&non_guardian, &200i128);
+    
+    // set target to unlock for reentrancy
+    token_client.set_target(&soroban_sdk::Symbol::new(&env, "unlock"));
+    
+    client.unlock_tokens(&non_guardian);
+    
+    assert!(token_client.is_locked());
+}
+
+#[test]
+fn test_reentrancy_start_reward_stream_prevented() {
+    let env = Env::default();
+    env.mock_all_auths();
+    
+    // Set up standard mock token first
+    let token_admin = Address::generate(&env);
+    let token = env.register_stellar_asset_contract_v2(token_admin);
+    let token_addr = token.address();
+    
+    let contract_id = env.register_contract(None, vero_core_contracts::VeroCore);
+    let client = VeroCoreClient::new(&env, &contract_id);
+    
+    let admin = Address::generate(&env);
+    client.initialize(&token_addr, &100i128);
+    client.set_weight_threshold(&admin, &100u64);
+    
+    let g = Address::generate(&env);
+    client.add_guardian(&admin, &g);
+    client.set_reputation(&admin, &g, &100u64);
+    
+    let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+    asset_client.mint(&g, &101i128);
+    client.lock_tokens(&g, &101i128);
+    
+    client.register_task(&admin, &42u64);
+    client.vote(&g, &42u64); // resolves task
+    
+    let reentrant_drips_id = env.register_contract(None, reentrant_drips_mock::MockReentrantDrips);
+    let drips_client = reentrant_drips_mock::MockReentrantDripsClient::new(&env, &reentrant_drips_id);
+    drips_client.set_vero(&client.address);
+    
+    let contributor = Address::generate(&env);
+    client.start_reward_stream(&admin, &reentrant_drips_id, &contributor, &42u64);
+    
+    assert!(drips_client.is_locked());
+}
