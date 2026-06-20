@@ -1659,13 +1659,16 @@
           "v0": {
             "topics": [
               {
-                "symbol": "resolved"
+                "symbol": "wt_vote"
               }
             ],
             "data": {
               "vec": [
                 {
                   "u64": 1
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
                 },
                 {
                   "u64": 300
@@ -1686,16 +1689,13 @@
           "v0": {
             "topics": [
               {
-                "symbol": "wt_vote"
+                "symbol": "resolved"
               }
             ],
             "data": {
               "vec": [
                 {
                   "u64": 1
-                },
-                {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
                 },
                 {
                   "u64": 300

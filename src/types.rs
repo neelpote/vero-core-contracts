@@ -1,4 +1,4 @@
-use soroban_sdk::{contracterror, contracttype, Address, Map, Vec};
+use soroban_sdk::{contracterror, contracttype, Address, Map};
 
 #[contracttype]
 #[derive(Clone)]
@@ -6,6 +6,7 @@ pub struct Task {
     pub id: u64,
     pub votes: u32,
     pub is_done: bool,
+    pub resolved_at: u64,
     pub total_weight_accrued: u64,
     pub is_cancelled: bool,
 }
@@ -41,7 +42,8 @@ pub enum DataKey {
     Guardian(Address),
     Reputation(Address),
     WeightThreshold,
-    Task(u64),
+    ActiveTask(u64),
+    ArchivedTask(u64),
     Voted(u64, Address),
     Admin,
     DripsAddress,
@@ -114,4 +116,9 @@ pub enum ContractError {
     ContractPaused = 15,
     EscrowUnavailable = 16,
     TaskCancelled = 17,
+    TaskNotFound = 18,
+    TaskNotStale = 19,
+    TaskAlreadyArchived = 20,
+    BatchTooLarge = 21,
+    InvalidAddress = 22,
 }
