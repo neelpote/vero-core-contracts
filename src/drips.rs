@@ -9,7 +9,7 @@ pub fn start_drips_stream(
     contributor: Address,
     task_id: u64,
 ) -> Result<(), ContractError> {
-    let task_key = DataKey::Task(task_id);
+    let task_key = DataKey::ActiveTask(task_id);
     let task: crate::types::Task = env
         .storage()
         .instance()
